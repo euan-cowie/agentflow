@@ -27,7 +27,9 @@
 - Repo manifest: `.agents/workflow.toml`
 - Task state: `~/.local/state/agentflow/tasks/<repo-id>/<task-id>.json`
 - Trust cache: `~/.local/state/agentflow/trust/<repo-id>.json`
+- Default worktrees: `~/.local/state/agentflow/worktrees/<repo-id>/<task-slug>-<taskid6>`
 - Managed env file: `.env.agentflow` by default
+- Optional overrides: `AGENTFLOW_STATE_HOME`, `AGENTFLOW_HOME`, `AGENTFLOW_CONFIG_HOME`
 
 ## Example manifest
 
@@ -35,7 +37,7 @@
 [repo]
 name = "coach-connect"
 base_branch = "origin/main"
-worktree_root = "../worktrees"
+worktree_root = "{{agentflow_state_home}}/worktrees/{{repo_id}}"
 branch_prefix = "feature"
 default_surface = "web"
 
@@ -90,3 +92,4 @@ mcp_servers = ["linear"]
 - Repo-defined commands are trust-gated by manifest fingerprint.
 - Existing task identity is anchored to saved state. Manifest drift is additive for tmux windows and current-only for verify/review commands.
 - Ports are treated as agentflow-managed preferred ports, not hard socket reservations.
+- `worktree_root` supports `{{agentflow_state_home}}`, `{{repo_id}}`, and `{{repo}}`.

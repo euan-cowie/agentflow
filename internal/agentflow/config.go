@@ -13,11 +13,13 @@ import (
 	toml "github.com/pelletier/go-toml/v2"
 )
 
+const defaultWorktreeRootTemplate = "{{agentflow_state_home}}/worktrees/{{repo_id}}"
+
 func defaultWorkflowConfig() WorkflowConfig {
 	return WorkflowConfig{
 		Repo: RepoConfig{
 			BaseBranch:     "origin/main",
-			WorktreeRoot:   "../worktrees",
+			WorktreeRoot:   defaultWorktreeRootTemplate,
 			DefaultSurface: "default",
 		},
 		Env: EnvConfig{
@@ -203,7 +205,7 @@ func resolveRuntimeConfig(repoRoot string, configOverridePath string) (RuntimeCo
 		merged.Ports.File = merged.Env.ManagedFile
 	}
 	if strings.TrimSpace(merged.Repo.WorktreeRoot) == "" {
-		merged.Repo.WorktreeRoot = "../worktrees"
+		merged.Repo.WorktreeRoot = defaultWorktreeRootTemplate
 	}
 
 	runtime := RuntimeConfig{

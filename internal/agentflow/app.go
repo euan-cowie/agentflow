@@ -172,7 +172,7 @@ func (a *App) Up(ctx context.Context, opts UpOptions) (TaskSummary, error) {
 		return a.failState(state, err)
 	}
 
-	worktreeRoot, err := resolveWorktreeRoot(runtime.Config, runtime.RepoRoot)
+	worktreeRoot, err := resolveWorktreeRoot(runtime)
 	if err != nil {
 		return a.failState(state, err)
 	}
@@ -250,7 +250,8 @@ func (a *App) Up(ctx context.Context, opts UpOptions) (TaskSummary, error) {
 func (a *App) reconcileExisting(ctx context.Context, runtime RuntimeConfig, state TaskState) (TaskSummary, error) {
 	manifestDrift := state.ManifestFingerprint != runtime.ManifestFingerprint
 	if err := a.git.ValidateTaskWorktree(ctx, state); err != nil {
-		return a.failState(state, err)
+		_, failErr := a.failState(state, fmt.Errorf("task %q is broken: %w. Run `agentflow down %q` to remove stale state, or `agentflow repair %q` if the worktree still exists", state.TaskRef.Title, err, state.TaskRef.Title, state.TaskRef.Title))
+		return TaskSummary{}, failErr
 	}
 	if err := a.ensureTmux(ctx, runtime, state, false); err != nil {
 		return a.failState(state, err)
@@ -526,7 +527,8 @@ func (a *App) Repair(ctx context.Context, opts CommonOptions, task string) (Task
 		_ = a.git.RepairWorktree(ctx, state.RepoRoot, state.WorktreePath)
 	}
 	if err := a.git.ValidateTaskWorktree(ctx, state); err != nil {
-		return a.failState(state, err)
+		_, failErr := a.failState(state, fmt.Errorf("task %q cannot be repaired automatically: %w. If the worktree is gone, run `agentflow down %q` to remove stale state", state.TaskRef.Title, err, state.TaskRef.Title))
+		return TaskSummary{}, failErr
 	}
 
 	envVars := map[string]string{}
@@ -638,13 +640,27 @@ func (a *App) failState(state TaskState, err error) (TaskSummary, error) {
 	}, err
 }
 
-func resolveWorktreeRoot(cfg WorkflowConfig, repoRoot string) (string, error) {
-	root := cfg.Repo.WorktreeRoot
+func resolveWorktreeRoot(runtime RuntimeConfig) (string, error) {
+	root := renderWorktreeRoot(runtime)
 	if filepath.IsAbs(root) {
-		return root, ensureDir(root)
+		return filepath.Clean(root), ensureDir(filepath.Clean(root))
 	}
-	resolved := filepath.Join(repoRoot, root)
+	resolved := filepath.Join(runtime.RepoRoot, root)
+	resolved = filepath.Clean(resolved)
 	return resolved, ensureDir(resolved)
+}
+
+func renderWorktreeRoot(runtime RuntimeConfig) string {
+	root := strings.TrimSpace(runtime.Config.Repo.WorktreeRoot)
+	if root == "" {
+		root = defaultWorktreeRootTemplate
+	}
+	replacer := strings.NewReplacer(
+		"{{agentflow_state_home}}", runtime.StateRoot,
+		"{{repo_id}}", runtime.RepoID,
+		"{{repo}}", slugify(runtime.Config.Repo.Name),
+	)
+	return replacer.Replace(root)
 }
 
 func primaryAgentWindow(cfg WorkflowConfig) *TmuxWindowConfig {

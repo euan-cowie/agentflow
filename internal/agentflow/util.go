@@ -73,6 +73,15 @@ func uniqueStrings(values []string) []string {
 }
 
 func stateRootPath() (string, error) {
+	if value := strings.TrimSpace(os.Getenv("AGENTFLOW_STATE_HOME")); value != "" {
+		return filepath.Clean(value), nil
+	}
+	if value := strings.TrimSpace(os.Getenv("AGENTFLOW_HOME")); value != "" {
+		return filepath.Clean(value), nil
+	}
+	if value := strings.TrimSpace(os.Getenv("XDG_STATE_HOME")); value != "" {
+		return filepath.Join(value, "agentflow"), nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve home dir: %w", err)
@@ -81,6 +90,12 @@ func stateRootPath() (string, error) {
 }
 
 func globalConfigPath() (string, error) {
+	if value := strings.TrimSpace(os.Getenv("AGENTFLOW_CONFIG_HOME")); value != "" {
+		return filepath.Join(filepath.Clean(value), "config.toml"), nil
+	}
+	if value := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); value != "" {
+		return filepath.Join(value, "agentflow", "config.toml"), nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve home dir: %w", err)

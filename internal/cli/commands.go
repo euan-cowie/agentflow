@@ -145,7 +145,11 @@ func listCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
 				return err
 			}
 			for _, state := range states {
-				fmt.Fprintf(os.Stdout, "%s\t%s\t%s\t%s\t%s\n", state.TaskRef.Title, state.Status, state.Branch, state.WorktreePath, state.TmuxSession)
+				fmt.Fprintf(os.Stdout, "%s\t%s\t%s\t%s\t%s", state.TaskRef.Title, state.Status, state.Branch, state.WorktreePath, state.TmuxSession)
+				if state.FailureReason != "" {
+					fmt.Fprintf(os.Stdout, "\t%s", state.FailureReason)
+				}
+				fmt.Fprintln(os.Stdout)
 			}
 			return nil
 		},
