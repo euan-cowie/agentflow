@@ -2,6 +2,7 @@ package agentflow
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -34,17 +35,40 @@ func (r AgentRunner) commandString(agent AgentConfig, worktree string, prompt st
 }
 
 func taskEnv(state TaskState) []string {
-	values := make([]string, 0, 4)
+	values := make([]string, 0, 6)
 	values = append(values, "AGENTFLOW_TASK_ID="+state.TaskID)
 	values = append(values, "AGENTFLOW_TASK_SLUG="+state.TaskRef.Slug)
 	values = append(values, "AGENTFLOW_WORKTREE="+state.WorktreePath)
-	if state.AllocatedPort != 0 {
-		values = append(values, fmt.Sprintf("AGENTFLOW_PORT=%d", state.AllocatedPort))
-		if state.PortKey != "" && state.PortKey != "AGENTFLOW_PORT" {
-			values = append(values, fmt.Sprintf("%s=%d", state.PortKey, state.AllocatedPort))
+	managedFiles := state.EffectiveManagedEnvFiles()
+	absoluteManagedFiles := make([]string, 0, len(managedFiles))
+	for _, target := range managedFiles {
+		absoluteManagedFiles = append(absoluteManagedFiles, filepath.Join(state.WorktreePath, target))
+	}
+	if len(absoluteManagedFiles) == 1 {
+		values = append(values, "AGENTFLOW_ENV_FILE="+absoluteManagedFiles[0])
+	}
+	if len(absoluteManagedFiles) > 0 {
+		values = append(values, "AGENTFLOW_ENV_FILES="+strings.Join(absoluteManagedFiles, string(os.PathListSeparator)))
+	}
+
+	bindings := state.EffectivePortBindings()
+	if len(bindings) > 0 {
+		values = append(values, fmt.Sprintf("AGENTFLOW_PORT=%d", bindings[0].Port))
+	}
+	seen := map[string]int{}
+	ports := map[string]int{}
+	for _, binding := range bindings {
+		if binding.Key == "" || binding.Port == 0 {
+			continue
+		}
+		seen[binding.Key]++
+		ports[binding.Key] = binding.Port
+	}
+	for key, count := range seen {
+		if count == 1 {
+			values = append(values, fmt.Sprintf("%s=%d", key, ports[key]))
 		}
 	}
-	values = append(values, "AGENTFLOW_ENV_FILE="+filepath.Join(state.WorktreePath, state.ManagedEnvFile))
 	return values
 }
 

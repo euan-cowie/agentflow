@@ -82,6 +82,9 @@ func mergeWorkflowConfig(base, override WorkflowConfig) WorkflowConfig {
 	if override.Env.ManagedFile != "" {
 		out.Env.ManagedFile = override.Env.ManagedFile
 	}
+	if len(override.Env.Targets) > 0 {
+		out.Env.Targets = append([]EnvTargetConfig(nil), override.Env.Targets...)
+	}
 
 	if override.Ports.Enabled {
 		out.Ports.Enabled = true
@@ -97,6 +100,9 @@ func mergeWorkflowConfig(base, override WorkflowConfig) WorkflowConfig {
 	}
 	if override.Ports.End != 0 {
 		out.Ports.End = override.Ports.End
+	}
+	if len(override.Ports.Bindings) > 0 {
+		out.Ports.Bindings = append([]PortBindingConfig(nil), override.Ports.Bindings...)
 	}
 
 	if len(override.Commands) > 0 {
@@ -201,7 +207,7 @@ func resolveRuntimeConfig(repoRoot string, configOverridePath string) (RuntimeCo
 	if merged.Repo.Name == "" {
 		merged.Repo.Name = filepath.Base(canonicalRoot)
 	}
-	if merged.Ports.File == "" {
+	if merged.Ports.File == "" && len(merged.Env.Targets) == 0 {
 		merged.Ports.File = merged.Env.ManagedFile
 	}
 	if strings.TrimSpace(merged.Repo.WorktreeRoot) == "" {
@@ -232,12 +238,44 @@ func validateWorkflowConfig(cfg WorkflowConfig) error {
 	if cfg.Env.ManagedFile == "" {
 		return errors.New("env.managed_file must not be empty")
 	}
-	if cfg.Ports.Enabled {
-		if cfg.Ports.Key == "" {
-			return errors.New("ports.key must not be empty when ports are enabled")
+	managedFiles, err := effectiveManagedEnvFiles(cfg)
+	if err != nil {
+		return err
+	}
+	if len(managedFiles) == 0 {
+		return errors.New("env.targets must not be empty")
+	}
+	portBindings, err := effectivePortBindings(cfg)
+	if err != nil {
+		return err
+	}
+	seenTargets := map[string]struct{}{}
+	for _, path := range managedFiles {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return errors.New("managed env target path must not be empty")
 		}
-		if cfg.Ports.Start == 0 || cfg.Ports.End == 0 || cfg.Ports.End < cfg.Ports.Start {
-			return errors.New("ports.start/end must describe a valid range")
+		if _, exists := seenTargets[path]; exists {
+			return fmt.Errorf("managed env target %q is declared more than once", path)
+		}
+		seenTargets[path] = struct{}{}
+	}
+	seenBindingTargets := map[string]struct{}{}
+	for _, binding := range portBindings {
+		if strings.TrimSpace(binding.Target) == "" {
+			return errors.New("port binding target must not be empty")
+		}
+		if strings.TrimSpace(binding.Key) == "" {
+			return fmt.Errorf("port binding for target %q must declare key", binding.Target)
+		}
+		if binding.Start == 0 || binding.End == 0 || binding.End < binding.Start {
+			return fmt.Errorf("port binding %q must describe a valid range", binding.Key)
+		}
+		seenBindingTargets[binding.Target] = struct{}{}
+	}
+	for target := range seenBindingTargets {
+		if _, ok := seenTargets[target]; !ok {
+			return fmt.Errorf("port binding target %q must also be declared in env.targets or env.managed_file", target)
 		}
 	}
 	if len(cfg.Tmux.Windows) == 0 {
@@ -265,6 +303,56 @@ func validateWorkflowConfig(cfg WorkflowConfig) error {
 		return errors.New("v1 supports at most one tmux agent window")
 	}
 	return nil
+}
+
+func effectiveManagedEnvFiles(cfg WorkflowConfig) ([]string, error) {
+	paths := make([]string, 0)
+	for _, target := range cfg.Env.Targets {
+		path := strings.TrimSpace(target.Path)
+		if path == "" {
+			return nil, errors.New("env target path must not be empty")
+		}
+		paths = append(paths, path)
+	}
+	if len(paths) == 0 {
+		path := strings.TrimSpace(cfg.Env.ManagedFile)
+		if path == "" {
+			return nil, errors.New("env.managed_file must not be empty")
+		}
+		paths = append(paths, path)
+	}
+	for _, binding := range cfg.Ports.Bindings {
+		target := strings.TrimSpace(binding.Target)
+		if target != "" {
+			paths = append(paths, target)
+		}
+	}
+	return uniqueStrings(paths), nil
+}
+
+func effectivePortBindings(cfg WorkflowConfig) ([]PortBindingConfig, error) {
+	if len(cfg.Ports.Bindings) > 0 {
+		return append([]PortBindingConfig(nil), cfg.Ports.Bindings...), nil
+	}
+	if !cfg.Ports.Enabled {
+		return nil, nil
+	}
+	target := strings.TrimSpace(cfg.Ports.File)
+	if target == "" && len(cfg.Env.Targets) > 0 {
+		target = strings.TrimSpace(cfg.Env.Targets[0].Path)
+	}
+	if target == "" {
+		target = strings.TrimSpace(cfg.Env.ManagedFile)
+	}
+	if target == "" {
+		return nil, errors.New("ports.file or env.managed_file must be set when legacy ports are enabled")
+	}
+	return []PortBindingConfig{{
+		Target: target,
+		Key:    cfg.Ports.Key,
+		Start:  cfg.Ports.Start,
+		End:    cfg.Ports.End,
+	}}, nil
 }
 
 func manifestExecutableEntries(cfg WorkflowConfig) []string {

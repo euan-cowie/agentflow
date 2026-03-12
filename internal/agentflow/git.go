@@ -157,6 +157,22 @@ func (g GitOps) IsDirty(ctx context.Context, worktreePath string) (bool, error) 
 	return strings.TrimSpace(result.Stdout) != "", nil
 }
 
+func (g GitOps) IsDirtyIgnoring(ctx context.Context, worktreePath string, ignorePaths []string) (bool, error) {
+	args := []string{"status", "--porcelain", "--untracked-files=all", "--", "."}
+	for _, path := range uniqueStrings(ignorePaths) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		args = append(args, ":(exclude)"+path)
+	}
+	result, err := g.exec.Run(ctx, worktreePath, nil, "git", args...)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(result.Stdout) != "", nil
+}
+
 func (g GitOps) ValidateTaskWorktree(ctx context.Context, state TaskState) error {
 	infos, err := g.WorktreeList(ctx, state.RepoRoot)
 	if err != nil {

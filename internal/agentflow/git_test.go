@@ -42,6 +42,33 @@ func TestResolveBaseRefRejectsUnbornRepo(t *testing.T) {
 	}
 }
 
+func TestIsDirtyIgnoringManagedEnvFiles(t *testing.T) {
+	t.Parallel()
+
+	repo := initCommittedRepo(t)
+	git := NewGitOps(Executor{})
+
+	if err := os.WriteFile(filepath.Join(repo, ".env.agentflow"), []byte("VITE_PORT=4101\n"), 0o644); err != nil {
+		t.Fatalf("write managed env file: %v", err)
+	}
+
+	dirty, err := git.IsDirty(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("IsDirty returned error: %v", err)
+	}
+	if !dirty {
+		t.Fatal("expected untracked managed env file to make repo dirty without ignore rules")
+	}
+
+	dirty, err = git.IsDirtyIgnoring(context.Background(), repo, []string{".env.agentflow"})
+	if err != nil {
+		t.Fatalf("IsDirtyIgnoring returned error: %v", err)
+	}
+	if dirty {
+		t.Fatal("expected managed env file to be ignored in dirty check")
+	}
+}
+
 func initCommittedRepo(t *testing.T) string {
 	t.Helper()
 

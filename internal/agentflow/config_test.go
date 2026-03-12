@@ -58,6 +58,63 @@ func TestMergeWorkflowConfigPrecedence(t *testing.T) {
 	}
 }
 
+func TestEffectiveManagedEnvFilesIncludesTargetsAndBindingTargets(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultWorkflowConfig()
+	cfg.Env.Targets = []EnvTargetConfig{
+		{Path: "apps/web/.env.agentflow"},
+		{Path: "apps/mobile/.env.agentflow"},
+	}
+	cfg.Ports.Bindings = []PortBindingConfig{
+		{Target: "packages/api/.env.agentflow", Key: "PORT", Start: 5101, End: 5199},
+	}
+
+	files, err := effectiveManagedEnvFiles(cfg)
+	if err != nil {
+		t.Fatalf("effectiveManagedEnvFiles returned error: %v", err)
+	}
+	expected := []string{
+		"apps/web/.env.agentflow",
+		"apps/mobile/.env.agentflow",
+		"packages/api/.env.agentflow",
+	}
+	if len(files) != len(expected) {
+		t.Fatalf("expected %d managed env files, got %d (%v)", len(expected), len(files), files)
+	}
+	for _, want := range expected {
+		if !contains(files, want) {
+			t.Fatalf("expected managed env files to include %q, got %v", want, files)
+		}
+	}
+}
+
+func TestEffectivePortBindingsLegacyFallsBackToFirstEnvTarget(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultWorkflowConfig()
+	cfg.Env.Targets = []EnvTargetConfig{
+		{Path: "apps/web/.env.agentflow"},
+		{Path: "apps/mobile/.env.agentflow"},
+	}
+	cfg.Ports.Enabled = true
+	cfg.Ports.File = ""
+	cfg.Ports.Key = "VITE_PORT"
+	cfg.Ports.Start = 4101
+	cfg.Ports.End = 4199
+
+	bindings, err := effectivePortBindings(cfg)
+	if err != nil {
+		t.Fatalf("effectivePortBindings returned error: %v", err)
+	}
+	if len(bindings) != 1 {
+		t.Fatalf("expected one binding, got %d", len(bindings))
+	}
+	if bindings[0].Target != "apps/web/.env.agentflow" {
+		t.Fatalf("expected legacy ports to target first env target, got %q", bindings[0].Target)
+	}
+}
+
 func TestResolveWorktreeRootUsesRepoRootRelativePaths(t *testing.T) {
 	t.Parallel()
 

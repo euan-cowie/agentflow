@@ -21,15 +21,28 @@ type BootstrapConfig struct {
 }
 
 type EnvConfig struct {
-	ManagedFile string `toml:"managed_file" json:"managed_file"`
+	ManagedFile string            `toml:"managed_file" json:"managed_file"`
+	Targets     []EnvTargetConfig `toml:"targets" json:"targets"`
+}
+
+type EnvTargetConfig struct {
+	Path string `toml:"path" json:"path"`
 }
 
 type PortsConfig struct {
-	Enabled bool   `toml:"enabled" json:"enabled"`
-	File    string `toml:"file" json:"file"`
-	Key     string `toml:"key" json:"key"`
-	Start   int    `toml:"start" json:"start"`
-	End     int    `toml:"end" json:"end"`
+	Enabled  bool                `toml:"enabled" json:"enabled"`
+	File     string              `toml:"file" json:"file"`
+	Key      string              `toml:"key" json:"key"`
+	Start    int                 `toml:"start" json:"start"`
+	End      int                 `toml:"end" json:"end"`
+	Bindings []PortBindingConfig `toml:"bindings" json:"bindings"`
+}
+
+type PortBindingConfig struct {
+	Target string `toml:"target" json:"target"`
+	Key    string `toml:"key" json:"key"`
+	Start  int    `toml:"start" json:"start"`
+	End    int    `toml:"end" json:"end"`
 }
 
 type AgentConfig struct {
@@ -87,25 +100,33 @@ type TaskRef struct {
 }
 
 type TaskState struct {
-	TaskID              string    `json:"task_id"`
-	TaskRef             TaskRef   `json:"task_ref"`
-	Status              string    `json:"status"`
-	FailureReason       string    `json:"failure_reason,omitempty"`
-	RepoRoot            string    `json:"repo_root"`
-	RepoID              string    `json:"repo_id"`
-	WorktreePath        string    `json:"worktree_path"`
-	Branch              string    `json:"branch"`
-	BaseBranch          string    `json:"base_branch"`
-	Surface             string    `json:"surface"`
-	TmuxSession         string    `json:"tmux_session"`
-	PrimaryAgentWindow  string    `json:"primary_agent_window"`
-	CodexSessionID      string    `json:"codex_session_id,omitempty"`
-	AllocatedPort       int       `json:"allocated_port,omitempty"`
-	PortKey             string    `json:"port_key,omitempty"`
-	ManagedEnvFile      string    `json:"managed_env_file"`
-	ManifestFingerprint string    `json:"manifest_fingerprint,omitempty"`
-	CreatedAt           time.Time `json:"created_at"`
-	UpdatedAt           time.Time `json:"updated_at"`
+	TaskID              string             `json:"task_id"`
+	TaskRef             TaskRef            `json:"task_ref"`
+	Status              string             `json:"status"`
+	FailureReason       string             `json:"failure_reason,omitempty"`
+	RepoRoot            string             `json:"repo_root"`
+	RepoID              string             `json:"repo_id"`
+	WorktreePath        string             `json:"worktree_path"`
+	Branch              string             `json:"branch"`
+	BaseBranch          string             `json:"base_branch"`
+	Surface             string             `json:"surface"`
+	TmuxSession         string             `json:"tmux_session"`
+	PrimaryAgentWindow  string             `json:"primary_agent_window"`
+	CodexSessionID      string             `json:"codex_session_id,omitempty"`
+	PortBindings        []PortBindingState `json:"port_bindings,omitempty"`
+	ManagedEnvFiles     []string           `json:"managed_env_files,omitempty"`
+	AllocatedPort       int                `json:"allocated_port,omitempty"`
+	PortKey             string             `json:"port_key,omitempty"`
+	ManagedEnvFile      string             `json:"managed_env_file"`
+	ManifestFingerprint string             `json:"manifest_fingerprint,omitempty"`
+	CreatedAt           time.Time          `json:"created_at"`
+	UpdatedAt           time.Time          `json:"updated_at"`
+}
+
+type PortBindingState struct {
+	Target string `json:"target"`
+	Key    string `json:"key"`
+	Port   int    `json:"port"`
 }
 
 type TaskSummary struct {
@@ -147,3 +168,32 @@ const (
 	StatusBroken   = "broken"
 	StatusDeleting = "deleting"
 )
+
+func (s TaskState) EffectiveManagedEnvFiles() []string {
+	if len(s.ManagedEnvFiles) > 0 {
+		return append([]string(nil), uniqueStrings(s.ManagedEnvFiles)...)
+	}
+	if s.ManagedEnvFile != "" {
+		return []string{s.ManagedEnvFile}
+	}
+	return nil
+}
+
+func (s TaskState) EffectivePortBindings() []PortBindingState {
+	if len(s.PortBindings) > 0 {
+		return append([]PortBindingState(nil), s.PortBindings...)
+	}
+	if s.AllocatedPort == 0 {
+		return nil
+	}
+	target := s.ManagedEnvFile
+	key := s.PortKey
+	if key == "" {
+		key = "AGENTFLOW_PORT"
+	}
+	return []PortBindingState{{
+		Target: target,
+		Key:    key,
+		Port:   s.AllocatedPort,
+	}}
+}

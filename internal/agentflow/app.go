@@ -187,19 +187,18 @@ func (a *App) Up(ctx context.Context, opts UpOptions) (TaskSummary, error) {
 	}
 	state.BaseBranch = resolvedBase
 
-	var envVars map[string]string
-	if runtime.Config.Ports.Enabled {
-		port, err := allocatePreferredPort(runtime.Config.Ports.Start, runtime.Config.Ports.End)
-		if err != nil {
-			return a.failState(state, err)
-		}
-		state.AllocatedPort = port
-		state.PortKey = runtime.Config.Ports.Key
-		envVars = map[string]string{
-			runtime.Config.Ports.Key: fmt.Sprintf("%d", port),
-		}
-	} else {
-		envVars = map[string]string{}
+	managedEnvFiles, portBindings, err := buildTaskEnvState(runtime.Config)
+	if err != nil {
+		return a.failState(state, err)
+	}
+	state.ManagedEnvFiles = managedEnvFiles
+	if len(managedEnvFiles) > 0 {
+		state.ManagedEnvFile = managedEnvFiles[0]
+	}
+	state.PortBindings = portBindings
+	if len(portBindings) > 0 {
+		state.AllocatedPort = portBindings[0].Port
+		state.PortKey = portBindings[0].Key
 	}
 
 	if err := a.git.CreateWorktree(ctx, runtime.RepoRoot, state.Branch, state.WorktreePath, state.BaseBranch); err != nil {
@@ -210,7 +209,7 @@ func (a *App) Up(ctx context.Context, opts UpOptions) (TaskSummary, error) {
 		return TaskSummary{}, err
 	}
 
-	if _, err := writeManagedEnvFile(state.WorktreePath, state.ManagedEnvFile, envVars); err != nil {
+	if _, err := writeManagedEnvFiles(state.WorktreePath, state.EffectiveManagedEnvFiles(), portBindingValues(state.EffectivePortBindings())); err != nil {
 		return a.failState(state, err)
 	}
 	state.UpdatedAt = a.now()
@@ -428,7 +427,7 @@ func (a *App) Down(ctx context.Context, opts DownOptions) (TaskSummary, error) {
 	}
 	worktreeValid := a.git.ValidateTaskWorktree(ctx, state) == nil
 	if worktreeValid {
-		dirty, err := a.git.IsDirty(ctx, state.WorktreePath)
+		dirty, err := a.git.IsDirtyIgnoring(ctx, state.WorktreePath, state.EffectiveManagedEnvFiles())
 		if err != nil {
 			return TaskSummary{}, err
 		}
@@ -531,15 +530,7 @@ func (a *App) Repair(ctx context.Context, opts CommonOptions, task string) (Task
 		return TaskSummary{}, failErr
 	}
 
-	envVars := map[string]string{}
-	if state.AllocatedPort != 0 {
-		key := state.PortKey
-		if key == "" {
-			key = "AGENTFLOW_PORT"
-		}
-		envVars[key] = fmt.Sprintf("%d", state.AllocatedPort)
-	}
-	if _, err := writeManagedEnvFile(state.WorktreePath, state.ManagedEnvFile, envVars); err != nil {
+	if _, err := writeManagedEnvFiles(state.WorktreePath, state.EffectiveManagedEnvFiles(), portBindingValues(state.EffectivePortBindings())); err != nil {
 		return a.failState(state, err)
 	}
 

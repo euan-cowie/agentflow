@@ -56,3 +56,56 @@ func writeManagedEnvFile(worktree string, relativePath string, variables map[str
 	}
 	return target, nil
 }
+
+func writeManagedEnvFiles(worktree string, targetPaths []string, valuesByTarget map[string]map[string]string) ([]string, error) {
+	written := make([]string, 0, len(targetPaths))
+	for _, target := range uniqueStrings(targetPaths) {
+		vars := valuesByTarget[target]
+		if vars == nil {
+			vars = map[string]string{}
+		}
+		path, err := writeManagedEnvFile(worktree, target, vars)
+		if err != nil {
+			return nil, err
+		}
+		written = append(written, path)
+	}
+	return written, nil
+}
+
+func portBindingValues(bindings []PortBindingState) map[string]map[string]string {
+	values := make(map[string]map[string]string)
+	for _, binding := range bindings {
+		if _, ok := values[binding.Target]; !ok {
+			values[binding.Target] = map[string]string{}
+		}
+		values[binding.Target][binding.Key] = fmt.Sprintf("%d", binding.Port)
+	}
+	return values
+}
+
+func buildTaskEnvState(cfg WorkflowConfig) ([]string, []PortBindingState, error) {
+	targets, err := effectiveManagedEnvFiles(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	bindings, err := effectivePortBindings(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	reserved := map[int]struct{}{}
+	stateBindings := make([]PortBindingState, 0, len(bindings))
+	for _, binding := range bindings {
+		port, err := preferredPortAllocator(binding.Start, binding.End, reserved)
+		if err != nil {
+			return nil, nil, err
+		}
+		reserved[port] = struct{}{}
+		stateBindings = append(stateBindings, PortBindingState{
+			Target: binding.Target,
+			Key:    binding.Key,
+			Port:   port,
+		})
+	}
+	return targets, stateBindings, nil
+}

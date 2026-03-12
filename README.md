@@ -28,7 +28,7 @@
 - Task state: `~/.local/state/agentflow/tasks/<repo-id>/<task-id>.json`
 - Trust cache: `~/.local/state/agentflow/trust/<repo-id>.json`
 - Default worktrees: `~/.local/state/agentflow/worktrees/<repo-id>/<task-slug>-<taskid6>`
-- Managed env file: `.env.agentflow` by default
+- Managed env files: `.env.agentflow` by default, or multiple `env.targets` in monorepos
 - Optional overrides: `AGENTFLOW_STATE_HOME`, `AGENTFLOW_HOME`, `AGENTFLOW_CONFIG_HOME`
 
 ## Example manifest
@@ -48,13 +48,22 @@ env_files = [
 ]
 
 [env]
-managed_file = ".env.agentflow"
+targets = [
+  { path = "apps/web/.env.agentflow" },
+  { path = "packages/api/.env.agentflow" },
+]
 
-[ports]
-enabled = true
+[[ports.bindings]]
+target = "apps/web/.env.agentflow"
 key = "VITE_PORT"
 start = 4101
 end = 4199
+
+[[ports.bindings]]
+target = "packages/api/.env.agentflow"
+key = "PORT"
+start = 5101
+end = 5199
 
 [commands]
 review = "bun run review:release"
@@ -93,3 +102,4 @@ mcp_servers = ["linear"]
 - Existing task identity is anchored to saved state. Manifest drift is additive for tmux windows and current-only for verify/review commands.
 - Ports are treated as agentflow-managed preferred ports, not hard socket reservations.
 - `worktree_root` supports `{{agentflow_state_home}}`, `{{repo_id}}`, and `{{repo}}`.
+- `env.targets` lets agentflow manage multiple env files per worktree; legacy `env.managed_file` and `ports.enabled/file/key/start/end` still work as shorthand.

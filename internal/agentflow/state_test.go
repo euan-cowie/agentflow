@@ -120,3 +120,35 @@ func TestStateStoreNewRunLogPathCreatesDirectory(t *testing.T) {
 		t.Fatalf("expected log directory to exist: %v", err)
 	}
 }
+
+func TestTaskStateEffectiveManagedEnvFilesAndBindingsSupportLegacyAndCurrentShapes(t *testing.T) {
+	t.Parallel()
+
+	current := TaskState{
+		ManagedEnvFiles: []string{"apps/web/.env.agentflow", "packages/api/.env.agentflow"},
+		PortBindings: []PortBindingState{
+			{Target: "apps/web/.env.agentflow", Key: "VITE_PORT", Port: 4101},
+			{Target: "packages/api/.env.agentflow", Key: "PORT", Port: 5101},
+		},
+	}
+	if len(current.EffectiveManagedEnvFiles()) != 2 {
+		t.Fatalf("expected current state to expose both managed env files, got %v", current.EffectiveManagedEnvFiles())
+	}
+	if len(current.EffectivePortBindings()) != 2 {
+		t.Fatalf("expected current state to expose both bindings, got %v", current.EffectivePortBindings())
+	}
+
+	legacy := TaskState{
+		ManagedEnvFile: ".env.agentflow",
+		AllocatedPort:  4101,
+		PortKey:        "VITE_PORT",
+	}
+	files := legacy.EffectiveManagedEnvFiles()
+	if len(files) != 1 || files[0] != ".env.agentflow" {
+		t.Fatalf("unexpected legacy managed env files: %v", files)
+	}
+	bindings := legacy.EffectivePortBindings()
+	if len(bindings) != 1 || bindings[0].Key != "VITE_PORT" || bindings[0].Port != 4101 {
+		t.Fatalf("unexpected legacy bindings: %+v", bindings)
+	}
+}

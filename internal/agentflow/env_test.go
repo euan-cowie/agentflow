@@ -32,6 +32,87 @@ func TestWriteManagedEnvFileSortedAndStable(t *testing.T) {
 	}
 }
 
+func TestWriteManagedEnvFilesSupportsMultipleTargets(t *testing.T) {
+	t.Parallel()
+
+	worktree := t.TempDir()
+	written, err := writeManagedEnvFiles(worktree, []string{
+		"apps/web/.env.agentflow",
+		"packages/api/.env.agentflow",
+	}, map[string]map[string]string{
+		"apps/web/.env.agentflow": {
+			"VITE_PORT": "4101",
+		},
+		"packages/api/.env.agentflow": {
+			"PORT": "5101",
+		},
+	})
+	if err != nil {
+		t.Fatalf("writeManagedEnvFiles returned error: %v", err)
+	}
+	if len(written) != 2 {
+		t.Fatalf("expected two written files, got %d", len(written))
+	}
+
+	webData, err := os.ReadFile(filepath.Join(worktree, "apps/web/.env.agentflow"))
+	if err != nil {
+		t.Fatalf("read web env file: %v", err)
+	}
+	if !strings.Contains(string(webData), "VITE_PORT=4101") {
+		t.Fatalf("unexpected web env content: %q", string(webData))
+	}
+
+	apiData, err := os.ReadFile(filepath.Join(worktree, "packages/api/.env.agentflow"))
+	if err != nil {
+		t.Fatalf("read api env file: %v", err)
+	}
+	if !strings.Contains(string(apiData), "PORT=5101") {
+		t.Fatalf("unexpected api env content: %q", string(apiData))
+	}
+}
+
+func TestBuildTaskEnvStateAllocatesBindingsPerTarget(t *testing.T) {
+	cfg := defaultWorkflowConfig()
+	cfg.Env.Targets = []EnvTargetConfig{
+		{Path: "apps/web/.env.agentflow"},
+		{Path: "packages/api/.env.agentflow"},
+	}
+	cfg.Ports.Bindings = []PortBindingConfig{
+		{Target: "apps/web/.env.agentflow", Key: "VITE_PORT", Start: 34001, End: 34100},
+		{Target: "packages/api/.env.agentflow", Key: "PORT", Start: 35001, End: 35100},
+	}
+	originalAllocator := preferredPortAllocator
+	preferredPortAllocator = func(start, end int, reserved map[int]struct{}) (int, error) {
+		for port := start; port <= end; port++ {
+			if _, exists := reserved[port]; exists {
+				continue
+			}
+			return port, nil
+		}
+		return 0, nil
+	}
+	defer func() {
+		preferredPortAllocator = originalAllocator
+	}()
+
+	targets, bindings, err := buildTaskEnvState(cfg)
+	if err != nil {
+		t.Fatalf("buildTaskEnvState returned error: %v", err)
+	}
+	if len(targets) != 2 {
+		t.Fatalf("expected two targets, got %d", len(targets))
+	}
+	if len(bindings) != 2 {
+		t.Fatalf("expected two bindings, got %d", len(bindings))
+	}
+	if bindings[0].Target == bindings[1].Target {
+		t.Fatalf("expected bindings to target different files, got %+v", bindings)
+	}
+	if bindings[0].Port == 0 || bindings[1].Port == 0 {
+		t.Fatalf("expected allocated ports, got %+v", bindings)
+	}
+}
+
 func TestSeedEnvFilesCopiesOnlyWhenMissing(t *testing.T) {
 	t.Parallel()
 
