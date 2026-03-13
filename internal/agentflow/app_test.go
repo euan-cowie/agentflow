@@ -165,6 +165,88 @@ func TestDownStillRefusesUserDirtyFiles(t *testing.T) {
 	}
 }
 
+func TestUpExistingRestoresManagedEnvFiles(t *testing.T) {
+	repo := initCommittedRepo(t)
+	installFakeTmux(t)
+
+	ctx := context.Background()
+	exec := Executor{}
+	git := NewGitOps(exec)
+	repoRoot, err := git.RepoRoot(ctx, repo)
+	if err != nil {
+		t.Fatalf("RepoRoot returned error: %v", err)
+	}
+	repoRoot, err = filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks returned error: %v", err)
+	}
+	ref, taskID, err := resolveManualTask(repoRoot, "smoke test")
+	if err != nil {
+		t.Fatalf("resolveManualTask returned error: %v", err)
+	}
+
+	cfg := defaultEffectiveConfig()
+	cfg.Repo.Name = filepath.Base(repo)
+	branch := branchName(cfg, ref, taskID)
+	worktree := filepath.Join(t.TempDir(), ref.Slug+"-"+taskID[:6])
+	if err := git.CreateWorktree(ctx, repo, branch, worktree, "main"); err != nil {
+		t.Fatalf("CreateWorktree returned error: %v", err)
+	}
+
+	app, _, _ := newTestApp(t)
+	now := time.Now().UTC()
+	state := TaskState{
+		TaskID:             taskID,
+		TaskRef:            ref,
+		Status:             StatusBroken,
+		FailureReason:      "managed env file missing",
+		RepoRoot:           repoRoot,
+		RepoID:             repoID(repoRoot),
+		WorktreePath:       worktree,
+		Branch:             branch,
+		BaseBranch:         "main",
+		Surface:            "default",
+		TmuxSession:        renderSessionName(cfg, ref, taskID),
+		PrimaryAgentWindow: "codex",
+		ManagedEnvFiles:    []string{".env.agentflow"},
+		PortBindings: []PortBindingState{
+			{Target: ".env.agentflow", Key: "VITE_PORT", Port: 4101},
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := app.state.Save(state); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	summary, err := app.Up(ctx, UpOptions{
+		CommonOptions: CommonOptions{RepoPath: repo},
+		Task:          "smoke test",
+	})
+	if err != nil {
+		t.Fatalf("Up returned error: %v", err)
+	}
+	if summary.Status != StatusReady {
+		t.Fatalf("expected ready summary, got %+v", summary)
+	}
+
+	data, err := os.ReadFile(filepath.Join(worktree, ".env.agentflow"))
+	if err != nil {
+		t.Fatalf("read restored env file: %v", err)
+	}
+	if !strings.Contains(string(data), "VITE_PORT=4101") {
+		t.Fatalf("expected restored env file to contain VITE_PORT, got %q", string(data))
+	}
+
+	loaded, err := app.state.Load(state.RepoID, state.TaskID)
+	if err != nil {
+		t.Fatalf("load updated state: %v", err)
+	}
+	if loaded.Status != StatusReady || loaded.FailureReason != "" {
+		t.Fatalf("expected state to be repaired to ready, got %+v", loaded)
+	}
+}
+
 func newTestApp(t *testing.T) (*App, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 

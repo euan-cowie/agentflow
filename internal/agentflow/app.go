@@ -201,7 +201,7 @@ func (a *App) Up(ctx context.Context, opts UpOptions) (TaskSummary, error) {
 		return TaskSummary{}, err
 	}
 
-	if _, err := writeManagedEnvFiles(state.WorktreePath, state.EffectiveManagedEnvFiles(), portBindingValues(state.EffectivePortBindings())); err != nil {
+	if err := syncManagedEnvFiles(state); err != nil {
 		return a.failState(state, err)
 	}
 	state.UpdatedAt = a.now()
@@ -243,6 +243,9 @@ func (a *App) reconcileExisting(ctx context.Context, runtime RuntimeConfig, stat
 	if err := a.git.ValidateTaskWorktree(ctx, state); err != nil {
 		_, failErr := a.failState(state, fmt.Errorf("task %q is broken: %w. Run `agentflow down %q` to remove stale state, or `agentflow repair %q` if the worktree still exists", state.TaskRef.Title, err, state.TaskRef.Title, state.TaskRef.Title))
 		return TaskSummary{}, failErr
+	}
+	if err := syncManagedEnvFiles(state); err != nil {
+		return a.failState(state, err)
 	}
 	if err := a.ensureTmux(ctx, runtime, state, false); err != nil {
 		return a.failState(state, err)
@@ -529,7 +532,7 @@ func (a *App) Repair(ctx context.Context, opts CommonOptions, task string) (Task
 		return TaskSummary{}, failErr
 	}
 
-	if _, err := writeManagedEnvFiles(state.WorktreePath, state.EffectiveManagedEnvFiles(), portBindingValues(state.EffectivePortBindings())); err != nil {
+	if err := syncManagedEnvFiles(state); err != nil {
 		return a.failState(state, err)
 	}
 
@@ -617,6 +620,11 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) ([]DoctorCheck, er
 	}
 
 	return checks, nil
+}
+
+func syncManagedEnvFiles(state TaskState) error {
+	_, err := writeManagedEnvFiles(state.WorktreePath, state.EffectiveManagedEnvFiles(), portBindingValues(state.EffectivePortBindings()))
+	return err
 }
 
 func (a *App) failState(state TaskState, err error) (TaskSummary, error) {
