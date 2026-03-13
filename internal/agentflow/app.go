@@ -638,11 +638,18 @@ func (a *App) failState(state TaskState, err error) (TaskSummary, error) {
 func resolveWorktreeRoot(runtime RuntimeConfig) (string, error) {
 	root := renderWorktreeRoot(runtime)
 	if filepath.IsAbs(root) {
-		return filepath.Clean(root), ensureDir(filepath.Clean(root))
+		root = filepath.Clean(root)
+		if err := ensureDir(root); err != nil {
+			return "", err
+		}
+		return canonicalPath(root), nil
 	}
 	resolved := filepath.Join(runtime.RepoRoot, root)
 	resolved = filepath.Clean(resolved)
-	return resolved, ensureDir(resolved)
+	if err := ensureDir(resolved); err != nil {
+		return "", err
+	}
+	return canonicalPath(resolved), nil
 }
 
 func renderWorktreeRoot(runtime RuntimeConfig) string {

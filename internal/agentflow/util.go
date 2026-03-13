@@ -106,3 +106,12 @@ func globalConfigPath() (string, error) {
 func ensureDir(path string) error {
 	return os.MkdirAll(path, 0o755)
 }
+
+func canonicalPath(path string) string {
+	clean := filepath.Clean(path)
+	resolved, err := filepath.EvalSymlinks(clean)
+	if err != nil {
+		return clean
+	}
+	return resolved
+}

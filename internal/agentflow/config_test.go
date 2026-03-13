@@ -219,7 +219,7 @@ func TestResolveWorktreeRootUsesRepoRootRelativePaths(t *testing.T) {
 		t.Fatalf("resolveWorktreeRoot returned error: %v", err)
 	}
 
-	expected := filepath.Clean(filepath.Join(repoRoot, "../sandbox-worktrees"))
+	expected := canonicalPath(filepath.Join(repoRoot, "../sandbox-worktrees"))
 	if path != expected {
 		t.Fatalf("expected %q, got %q", expected, path)
 	}
@@ -251,7 +251,7 @@ func TestResolveWorktreeRootUsesDeterministicStateHomeDefault(t *testing.T) {
 		t.Fatalf("resolveWorktreeRoot returned error: %v", err)
 	}
 
-	expected := filepath.Join(stateRoot, "worktrees", "agentflow-840751fc")
+	expected := canonicalPath(filepath.Join(stateRoot, "worktrees", "agentflow-840751fc"))
 	if path != expected {
 		t.Fatalf("expected %q, got %q", expected, path)
 	}

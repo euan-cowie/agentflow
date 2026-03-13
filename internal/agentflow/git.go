@@ -179,8 +179,9 @@ func (g GitOps) ValidateTaskWorktree(ctx context.Context, state TaskState) error
 		return err
 	}
 	branchRef := "refs/heads/" + state.Branch
+	expectedPath := canonicalPath(state.WorktreePath)
 	for _, info := range infos {
-		if info.Path == state.WorktreePath && info.BranchRef == branchRef {
+		if canonicalPath(info.Path) == expectedPath && info.BranchRef == branchRef {
 			if _, err := os.Stat(info.Path); err != nil {
 				return fmt.Errorf("worktree path missing on disk: %s", info.Path)
 			}
@@ -196,8 +197,9 @@ func (g GitOps) BranchCheckedOutElsewhere(ctx context.Context, repoRoot, branch,
 		return false, err
 	}
 	branchRef := "refs/heads/" + branch
+	expectedPath = canonicalPath(expectedPath)
 	for _, info := range infos {
-		if info.BranchRef == branchRef && info.Path != expectedPath {
+		if info.BranchRef == branchRef && canonicalPath(info.Path) != expectedPath {
 			return true, nil
 		}
 	}
