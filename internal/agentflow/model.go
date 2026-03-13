@@ -10,12 +10,6 @@ type RepoConfig struct {
 	DefaultSurface string `toml:"default_surface" json:"default_surface"`
 }
 
-type GlobalRepoDefaults struct {
-	BaseBranch     string `toml:"base_branch" json:"base_branch"`
-	WorktreeRoot   string `toml:"worktree_root" json:"worktree_root"`
-	DefaultSurface string `toml:"default_surface" json:"default_surface"`
-}
-
 type EnvFileMapping struct {
 	From string `toml:"from" json:"from"`
 	To   string `toml:"to" json:"to"`
@@ -68,39 +62,7 @@ type RequirementsConfig struct {
 	MCPServers []string `toml:"mcp_servers" json:"mcp_servers"`
 }
 
-type GlobalDefaultsConfig struct {
-	Repo         GlobalRepoDefaults     `toml:"repo" json:"repo"`
-	Agents       map[string]AgentConfig `toml:"agents" json:"agents"`
-	Tmux         TmuxConfig             `toml:"tmux" json:"tmux"`
-	Requirements RequirementsConfig     `toml:"requirements" json:"requirements"`
-}
-
-type GlobalConfig struct {
-	Defaults GlobalDefaultsConfig `toml:"defaults" json:"defaults"`
-}
-
-type RepoConfigFile struct {
-	Repo RepoFileConfig `toml:"repo" json:"repo"`
-}
-
-type RepoFileConfig struct {
-	Name           string `toml:"name" json:"name"`
-	BaseBranch     string `toml:"base_branch" json:"base_branch"`
-	BranchPrefix   string `toml:"branch_prefix" json:"branch_prefix"`
-	DefaultSurface string `toml:"default_surface" json:"default_surface"`
-}
-
-type ManifestFile struct {
-	Bootstrap    BootstrapConfig        `toml:"bootstrap" json:"bootstrap"`
-	Env          EnvConfig              `toml:"env" json:"env"`
-	Ports        PortsConfig            `toml:"ports" json:"ports"`
-	Commands     map[string]string      `toml:"commands" json:"commands"`
-	Agents       map[string]AgentConfig `toml:"agents" json:"agents"`
-	Tmux         TmuxConfig             `toml:"tmux" json:"tmux"`
-	Requirements RequirementsConfig     `toml:"requirements" json:"requirements"`
-}
-
-type EffectiveConfig struct {
+type ConfigFile struct {
 	Repo         RepoConfig             `toml:"repo" json:"repo"`
 	Bootstrap    BootstrapConfig        `toml:"bootstrap" json:"bootstrap"`
 	Env          EnvConfig              `toml:"env" json:"env"`
@@ -111,34 +73,27 @@ type EffectiveConfig struct {
 	Requirements RequirementsConfig     `toml:"requirements" json:"requirements"`
 }
 
+type EffectiveConfig = ConfigFile
+
 type ConfigFileInfo struct {
 	Path   string
 	Exists bool
 }
 
 type ConfigOverview struct {
-	Global   ConfigFileInfo
-	Repo     *ConfigFileInfo
-	Manifest *ConfigFileInfo
+	Repo ConfigFileInfo
 }
 
 type RuntimeConfig struct {
-	RepoRoot              string
-	RepoID                string
-	RepoConfigPath        string
-	RepoConfigExists      bool
-	RepoConfigFingerprint string
-	ManifestPath          string
-	ManifestExists        bool
-	ManifestFingerprint   string
-	GlobalConfigPath      string
-	GlobalConfigExists    bool
-	StateRoot             string
-	Trusted               bool
-	GlobalConfig          GlobalConfig
-	RepoConfig            RepoConfigFile
-	Manifest              ManifestFile
-	EffectiveConfig       EffectiveConfig
+	RepoRoot            string
+	RepoID              string
+	ConfigPath          string
+	ConfigExists        bool
+	WorkflowFingerprint string
+	StateRoot           string
+	Trusted             bool
+	Config              ConfigFile
+	EffectiveConfig     EffectiveConfig
 }
 
 type TaskRef struct {
@@ -164,7 +119,7 @@ type TaskState struct {
 	CodexSessionID      string             `json:"codex_session_id,omitempty"`
 	PortBindings        []PortBindingState `json:"port_bindings,omitempty"`
 	ManagedEnvFiles     []string           `json:"managed_env_files,omitempty"`
-	ManifestFingerprint string             `json:"manifest_fingerprint,omitempty"`
+	WorkflowFingerprint string             `json:"workflow_fingerprint,omitempty"`
 	CreatedAt           time.Time          `json:"created_at"`
 	UpdatedAt           time.Time          `json:"updated_at"`
 }
@@ -176,21 +131,21 @@ type PortBindingState struct {
 }
 
 type TaskSummary struct {
-	TaskID        string
-	RepoRoot      string
-	Worktree      string
-	Branch        string
-	Session       string
-	Surface       string
-	Status        string
-	ManifestDrift bool
-	LogPath       string
+	TaskID      string
+	RepoRoot    string
+	Worktree    string
+	Branch      string
+	Session     string
+	Surface     string
+	Status      string
+	ConfigDrift bool
+	LogPath     string
 }
 
 type TrustRecord struct {
 	RepoRoot            string    `json:"repo_root"`
 	RepoID              string    `json:"repo_id"`
-	ManifestFingerprint string    `json:"manifest_fingerprint"`
+	WorkflowFingerprint string    `json:"workflow_fingerprint"`
 	AcceptedAt          time.Time `json:"accepted_at"`
 }
 

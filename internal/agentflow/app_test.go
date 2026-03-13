@@ -255,17 +255,16 @@ func newTestApp(t *testing.T) (*App, *bytes.Buffer, *bytes.Buffer) {
 	stderr := &bytes.Buffer{}
 	exec := Executor{}
 	return &App{
-		exec:       exec,
-		git:        NewGitOps(exec),
-		tmux:       NewTmuxOps(exec),
-		runner:     AgentRunner{},
-		state:      NewStateStore(stateRoot),
-		trust:      NewTrustStore(stateRoot),
-		stdin:      bytes.NewBufferString(""),
-		stdout:     stdout,
-		stderr:     stderr,
-		now:        func() time.Time { return time.Now().UTC() },
-		configPath: "",
+		exec:   exec,
+		git:    NewGitOps(exec),
+		tmux:   NewTmuxOps(exec),
+		runner: AgentRunner{},
+		state:  NewStateStore(stateRoot),
+		trust:  NewTrustStore(stateRoot),
+		stdin:  bytes.NewBufferString(""),
+		stdout: stdout,
+		stderr: stderr,
+		now:    func() time.Time { return time.Now().UTC() },
 	}, stdout, stderr
 }
 

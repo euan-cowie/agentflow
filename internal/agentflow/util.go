@@ -89,20 +89,6 @@ func stateRootPath() (string, error) {
 	return filepath.Join(home, ".local", "state", "agentflow"), nil
 }
 
-func globalConfigPath() (string, error) {
-	if value := strings.TrimSpace(os.Getenv("AGENTFLOW_CONFIG_HOME")); value != "" {
-		return filepath.Join(filepath.Clean(value), "config.toml"), nil
-	}
-	if value := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); value != "" {
-		return filepath.Join(value, "agentflow", "config.toml"), nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve home dir: %w", err)
-	}
-	return filepath.Join(home, ".config", "agentflow", "config.toml"), nil
-}
-
 func ensureDir(path string) error {
 	return os.MkdirAll(path, 0o755)
 }

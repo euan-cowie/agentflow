@@ -12,17 +12,16 @@ import (
 )
 
 type App struct {
-	exec       Executor
-	git        GitOps
-	tmux       TmuxOps
-	runner     AgentRunner
-	state      *StateStore
-	trust      *TrustStore
-	stdin      io.Reader
-	stdout     io.Writer
-	stderr     io.Writer
-	now        func() time.Time
-	configPath string
+	exec   Executor
+	git    GitOps
+	tmux   TmuxOps
+	runner AgentRunner
+	state  *StateStore
+	trust  *TrustStore
+	stdin  io.Reader
+	stdout io.Writer
+	stderr io.Writer
+	now    func() time.Time
 }
 
 type CommonOptions struct {
@@ -52,24 +51,23 @@ type DoctorOptions struct {
 	CommonOptions
 }
 
-func NewApp(stdin io.Reader, stdout, stderr io.Writer, configPath string) (*App, error) {
+func NewApp(stdin io.Reader, stdout, stderr io.Writer) (*App, error) {
 	stateRoot, err := stateRootPath()
 	if err != nil {
 		return nil, err
 	}
 	exec := Executor{}
 	return &App{
-		exec:       exec,
-		git:        NewGitOps(exec),
-		tmux:       NewTmuxOps(exec),
-		runner:     AgentRunner{},
-		state:      NewStateStore(stateRoot),
-		trust:      NewTrustStore(stateRoot),
-		stdin:      stdin,
-		stdout:     stdout,
-		stderr:     stderr,
-		now:        func() time.Time { return time.Now().UTC() },
-		configPath: configPath,
+		exec:   exec,
+		git:    NewGitOps(exec),
+		tmux:   NewTmuxOps(exec),
+		runner: AgentRunner{},
+		state:  NewStateStore(stateRoot),
+		trust:  NewTrustStore(stateRoot),
+		stdin:  stdin,
+		stdout: stdout,
+		stderr: stderr,
+		now:    func() time.Time { return time.Now().UTC() },
 	}, nil
 }
 
@@ -94,11 +92,11 @@ func (a *App) loadRuntime(ctx context.Context, repoArg string) (RuntimeConfig, e
 	if err != nil {
 		return RuntimeConfig{}, err
 	}
-	runtime, err := resolveRuntimeConfig(repoRoot, a.configPath)
+	runtime, err := resolveRuntimeConfig(repoRoot)
 	if err != nil {
 		return RuntimeConfig{}, err
 	}
-	trusted, err := a.trust.IsTrusted(runtime.RepoID, runtime.RepoRoot, runtime.ManifestFingerprint)
+	trusted, err := a.trust.IsTrusted(runtime.RepoID, runtime.RepoRoot, runtime.WorkflowFingerprint)
 	if err == nil {
 		runtime.Trusted = trusted
 	}
@@ -154,7 +152,7 @@ func (a *App) Up(ctx context.Context, opts UpOptions) (TaskSummary, error) {
 		Surface:             surface,
 		Branch:              branchName(runtime.EffectiveConfig, ref, taskID),
 		TmuxSession:         renderSessionName(runtime.EffectiveConfig, ref, taskID),
-		ManifestFingerprint: runtime.ManifestFingerprint,
+		WorkflowFingerprint: runtime.WorkflowFingerprint,
 		CreatedAt:           a.now(),
 		UpdatedAt:           a.now(),
 	}
@@ -166,8 +164,8 @@ func (a *App) Up(ctx context.Context, opts UpOptions) (TaskSummary, error) {
 		return TaskSummary{}, err
 	}
 
-	entries := manifestExecutableEntries(runtime.Manifest)
-	if _, err := a.trust.EnsureTrusted(runtime.RepoID, runtime.RepoRoot, runtime.ManifestPath, runtime.ManifestFingerprint, entries, a.stdin, a.stdout); err != nil {
+	entries := workflowTrustEntries(runtime.Config)
+	if _, err := a.trust.EnsureTrusted(runtime.RepoID, runtime.RepoRoot, runtime.ConfigPath, runtime.WorkflowFingerprint, entries, a.stdin, a.stdout); err != nil {
 		return a.failState(state, err)
 	}
 
@@ -239,7 +237,7 @@ func (a *App) Up(ctx context.Context, opts UpOptions) (TaskSummary, error) {
 }
 
 func (a *App) reconcileExisting(ctx context.Context, runtime RuntimeConfig, state TaskState) (TaskSummary, error) {
-	manifestDrift := state.ManifestFingerprint != runtime.ManifestFingerprint
+	configDrift := state.WorkflowFingerprint != runtime.WorkflowFingerprint
 	if err := a.git.ValidateTaskWorktree(ctx, state); err != nil {
 		_, failErr := a.failState(state, fmt.Errorf("task %q is broken: %w. Run `agentflow down %q` to remove stale state, or `agentflow repair %q` if the worktree still exists", state.TaskRef.Title, err, state.TaskRef.Title, state.TaskRef.Title))
 		return TaskSummary{}, failErr
@@ -257,14 +255,14 @@ func (a *App) reconcileExisting(ctx context.Context, runtime RuntimeConfig, stat
 		return TaskSummary{}, err
 	}
 	return TaskSummary{
-		TaskID:        state.TaskID,
-		RepoRoot:      state.RepoRoot,
-		Worktree:      state.WorktreePath,
-		Branch:        state.Branch,
-		Session:       state.TmuxSession,
-		Surface:       state.Surface,
-		Status:        state.Status,
-		ManifestDrift: manifestDrift,
+		TaskID:      state.TaskID,
+		RepoRoot:    state.RepoRoot,
+		Worktree:    state.WorktreePath,
+		Branch:      state.Branch,
+		Session:     state.TmuxSession,
+		Surface:     state.Surface,
+		Status:      state.Status,
+		ConfigDrift: configDrift,
 	}, nil
 }
 
@@ -366,8 +364,8 @@ func (a *App) runNamedCommand(ctx context.Context, opts VerifyOptions, name stri
 	if err != nil {
 		return TaskSummary{}, err
 	}
-	entries := manifestExecutableEntries(runtime.Manifest)
-	if _, err := a.trust.EnsureTrusted(runtime.RepoID, runtime.RepoRoot, runtime.ManifestPath, runtime.ManifestFingerprint, entries, a.stdin, a.stdout); err != nil {
+	entries := workflowTrustEntries(runtime.Config)
+	if _, err := a.trust.EnsureTrusted(runtime.RepoID, runtime.RepoRoot, runtime.ConfigPath, runtime.WorkflowFingerprint, entries, a.stdin, a.stdout); err != nil {
 		return TaskSummary{}, err
 	}
 
@@ -536,8 +534,8 @@ func (a *App) Repair(ctx context.Context, opts CommonOptions, task string) (Task
 		return a.failState(state, err)
 	}
 
-	entries := manifestExecutableEntries(runtime.Manifest)
-	if _, err := a.trust.EnsureTrusted(runtime.RepoID, runtime.RepoRoot, runtime.ManifestPath, runtime.ManifestFingerprint, entries, a.stdin, a.stdout); err != nil {
+	entries := workflowTrustEntries(runtime.Config)
+	if _, err := a.trust.EnsureTrusted(runtime.RepoID, runtime.RepoRoot, runtime.ConfigPath, runtime.WorkflowFingerprint, entries, a.stdin, a.stdout); err != nil {
 		return a.failState(state, err)
 	}
 
@@ -590,14 +588,9 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) ([]DoctorCheck, er
 
 	if opts.RepoPath != "" {
 		checks = append(checks, DoctorCheck{
-			Name:    "repo-config",
-			OK:      runtime.RepoConfigExists,
-			Details: runtime.RepoConfigPath,
-		})
-		checks = append(checks, DoctorCheck{
-			Name:    "manifest",
-			OK:      runtime.ManifestExists,
-			Details: runtime.ManifestPath,
+			Name:    "config",
+			OK:      runtime.ConfigExists,
+			Details: runtime.ConfigPath,
 		})
 
 		for _, server := range runtime.EffectiveConfig.Requirements.MCPServers {
@@ -718,8 +711,8 @@ func (a *App) ensureTmux(ctx context.Context, runtime RuntimeConfig, state TaskS
 		}
 	}
 	if needCreate {
-		entries := manifestExecutableEntries(runtime.Manifest)
-		if _, err := a.trust.EnsureTrusted(runtime.RepoID, runtime.RepoRoot, runtime.ManifestPath, runtime.ManifestFingerprint, entries, a.stdin, a.stdout); err != nil {
+		entries := workflowTrustEntries(runtime.Config)
+		if _, err := a.trust.EnsureTrusted(runtime.RepoID, runtime.RepoRoot, runtime.ConfigPath, runtime.WorkflowFingerprint, entries, a.stdin, a.stdout); err != nil {
 			return err
 		}
 	}

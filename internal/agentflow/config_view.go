@@ -2,89 +2,49 @@ package agentflow
 
 import (
 	"context"
+	"fmt"
 	"os"
 )
 
 func (a *App) ConfigOverview(ctx context.Context, repoArg string) (ConfigOverview, error) {
-	globalPath, err := ResolvedGlobalConfigPath(a.configPath)
+	repoRoot, err := a.resolveRepoRoot(ctx, repoArg)
 	if err != nil {
 		return ConfigOverview{}, err
 	}
-	globalExists := fileExists(globalPath)
-	overview := ConfigOverview{
-		Global: ConfigFileInfo{
-			Path:   globalPath,
-			Exists: globalExists,
+	if err := rejectLegacyManifest(repoRoot); err != nil {
+		return ConfigOverview{}, err
+	}
+	path := ResolvedConfigPath(repoRoot)
+	return ConfigOverview{
+		Repo: ConfigFileInfo{
+			Path:   path,
+			Exists: fileExists(path),
 		},
-	}
-
-	repoRoot, err := a.resolveRepoRoot(ctx, repoArg)
-	if err != nil {
-		if repoArg != "" {
-			return ConfigOverview{}, err
-		}
-		return overview, nil
-	}
-	repoPath := ResolvedRepoConfigPath(repoRoot)
-	manifestPath := ResolvedManifestPath(repoRoot)
-	overview.Repo = &ConfigFileInfo{
-		Path:   repoPath,
-		Exists: fileExists(repoPath),
-	}
-	overview.Manifest = &ConfigFileInfo{
-		Path:   manifestPath,
-		Exists: fileExists(manifestPath),
-	}
-	return overview, nil
+	}, nil
 }
 
-func (a *App) ShowGlobalConfig() (string, string, bool, error) {
-	path, err := ResolvedGlobalConfigPath(a.configPath)
-	if err != nil {
-		return "", "", false, err
-	}
-	content, exists, err := ReadConfigFile(path)
-	return path, content, exists, err
-}
-
-func (a *App) WriteGlobalConfig(force bool) (string, error) {
-	return WriteGlobalConfig(a.configPath, force)
-}
-
-func (a *App) ShowRepoConfig(ctx context.Context, repoArg string) (string, string, bool, error) {
+func (a *App) ShowConfig(ctx context.Context, repoArg string) (string, string, bool, error) {
 	repoRoot, err := a.resolveRepoRoot(ctx, repoArg)
 	if err != nil {
 		return "", "", false, err
 	}
-	path := ResolvedRepoConfigPath(repoRoot)
-	content, exists, err := ReadConfigFile(path)
-	return path, content, exists, err
-}
-
-func (a *App) ShowManifest(ctx context.Context, repoArg string) (string, string, bool, error) {
-	repoRoot, err := a.resolveRepoRoot(ctx, repoArg)
-	if err != nil {
+	if err := rejectLegacyManifest(repoRoot); err != nil {
 		return "", "", false, err
 	}
-	path := ResolvedManifestPath(repoRoot)
+	path := ResolvedConfigPath(repoRoot)
 	content, exists, err := ReadConfigFile(path)
 	return path, content, exists, err
 }
 
-func (a *App) WriteRepoConfig(ctx context.Context, repoArg string, force bool) (string, error) {
+func (a *App) WriteConfig(ctx context.Context, repoArg string, force bool) (string, error) {
 	repoRoot, err := a.resolveRepoRoot(ctx, repoArg)
 	if err != nil {
 		return "", err
 	}
-	return WriteRepoConfig(repoRoot, force)
-}
-
-func (a *App) WriteManifest(ctx context.Context, repoArg string, force bool) (string, error) {
-	repoRoot, err := a.resolveRepoRoot(ctx, repoArg)
-	if err != nil {
+	if err := rejectLegacyManifest(repoRoot); err != nil {
 		return "", err
 	}
-	return WriteManifest(repoRoot, force)
+	return WriteConfig(repoRoot, force)
 }
 
 func (a *App) ShowEffectiveConfig(ctx context.Context, repoArg string, format string) (string, error) {
@@ -98,4 +58,14 @@ func (a *App) ShowEffectiveConfig(ctx context.Context, repoArg string, format st
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func rejectLegacyManifest(repoRoot string) error {
+	legacyManifestPath := ResolvedLegacyManifestPath(repoRoot)
+	if _, err := os.Stat(legacyManifestPath); err == nil {
+		return fmt.Errorf("legacy repo manifest found at %s; merge it into %s and remove the manifest file", legacyManifestPath, ResolvedConfigPath(repoRoot))
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }

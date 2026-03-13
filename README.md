@@ -5,8 +5,7 @@
 ## Current scope
 
 - One task maps to one worktree, one tmux session, and one primary interactive Codex window.
-- Repo conventions come from `.agentflow/config.toml`.
-- Repo workflow comes from `.agentflow/manifest.toml`.
+- Repo workflow lives in `.agentflow/config.toml`.
 - The CLI owns lifecycle, trust, state, managed env output, worktree creation, and tmux recovery.
 - Codex remains the interactive agent.
 
@@ -22,78 +21,39 @@
 - `agentflow doctor`
 - `agentflow repair <task>`
 - `agentflow config`
-- `agentflow config global path|show|write`
-- `agentflow config repo path|show|write`
-- `agentflow config manifest path|show|write`
-- `agentflow config effective show [--format toml|json]`
+- `agentflow config path`
+- `agentflow config show`
+- `agentflow config write [--force]`
+- `agentflow config effective [--format toml|json]`
 
 ## Config files
 
-- Global config: `~/.config/agentflow/config.toml`
 - Repo config: `.agentflow/config.toml`
-- Repo manifest: `.agentflow/manifest.toml`
 - Task state: `~/.local/state/agentflow/tasks/<repo-id>/<task-id>.json`
 - Trust cache: `~/.local/state/agentflow/trust/<repo-id>.json`
 - Default worktrees: `~/.local/state/agentflow/worktrees/<repo-id>/<task-slug>-<taskid6>`
 - Managed env files: `.env.agentflow` by default, or multiple `env.targets` in monorepos
-- Optional overrides: `AGENTFLOW_STATE_HOME`, `AGENTFLOW_HOME`, `AGENTFLOW_CONFIG_HOME`
+- Optional state overrides: `AGENTFLOW_STATE_HOME`, `AGENTFLOW_HOME`
 
 Config ownership is:
 
-- Global config: personal machine-local defaults
-- Repo config: checked-in repo conventions and identity
-- Repo manifest: checked-in executable workflow policy
-- Effective config: the merged runtime view shown by `agentflow config effective show`
+- Repo config: checked-in repo identity and workflow
+- Effective config: the merged runtime view shown by `agentflow config effective`
 
-Merge precedence is domain-specific:
-
-- Repo identity keys: CLI flags, repo config, global defaults, built-ins
-- Workflow keys: CLI flags where applicable, repo manifest, global defaults, built-ins
-
-You can inspect all layers with:
+You can inspect the repo config with:
 
 ```sh
 agentflow config
-agentflow config global show
-agentflow config repo show
-agentflow config manifest show
-agentflow config effective show
+agentflow config show
+agentflow config effective
 ```
 
-Global config is optional. Repo config and manifest are optional too; if they are missing, agentflow falls back to built-ins.
+Repo config is optional. If `.agentflow/config.toml` is missing, agentflow falls back to built-ins.
 
-## Example global config
+Legacy note:
 
-```toml
-[defaults.repo]
-base_branch = "origin/main"
-worktree_root = "{{agentflow_state_home}}/worktrees/{{repo_id}}"
-default_surface = "default"
-
-[defaults.agents.default]
-runner = "codex"
-command = "codex --no-alt-screen -s workspace-write -a on-request"
-prime_prompt = "Read AGENTS.md and any relevant repo instructions before acting."
-resume_prompt = "Resume the current task and re-check AGENTS.md if the repo changed."
-
-[defaults.tmux]
-session_name = "{{repo}}-{{task}}-{{id}}"
-
-[[defaults.tmux.windows]]
-name = "editor"
-command = "nvim ."
-
-[[defaults.tmux.windows]]
-name = "verify"
-command = "clear"
-
-[[defaults.tmux.windows]]
-name = "codex"
-agent = "default"
-
-[defaults.requirements]
-binaries = ["git", "tmux", "codex", "nvim"]
-```
+- `.agentflow/manifest.toml` is no longer supported.
+- If it exists, agentflow will fail and tell you to merge it into `.agentflow/config.toml`.
 
 ## Example repo config
 
@@ -101,13 +61,10 @@ binaries = ["git", "tmux", "codex", "nvim"]
 [repo]
 name = "coach-connect"
 base_branch = "origin/main"
+worktree_root = "{{agentflow_state_home}}/worktrees/{{repo_id}}"
 branch_prefix = "feature"
 default_surface = "web"
-```
 
-## Example repo manifest
-
-```toml
 [bootstrap]
 commands = ["bun install --frozen-lockfile"]
 env_files = [
@@ -165,8 +122,9 @@ mcp_servers = ["linear"]
 
 ## Notes
 
-- Repo-defined commands are trust-gated by manifest fingerprint.
-- Existing task identity is anchored to saved state. Manifest drift is additive for tmux windows and current-only for verify/review commands.
+- Repo-defined workflow is trust-gated by the workflow fingerprint of `.agentflow/config.toml`.
+- Changes to `repo.*` and `requirements.*` do not invalidate trust or count as config drift.
+- Existing task identity is anchored to saved state. Config drift is additive for tmux windows and current-only for verify/review commands.
 - Ports are treated as agentflow-managed preferred ports, not hard socket reservations.
 - `worktree_root` supports `{{agentflow_state_home}}`, `{{repo_id}}`, and `{{repo}}`.
 - `env.targets` declares the agentflow-managed env files for the task, and `ports.bindings` attaches generated ports to those targets.

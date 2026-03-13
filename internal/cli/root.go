@@ -11,7 +11,6 @@ import (
 
 func NewRootCommand() *cobra.Command {
 	var repoPath string
-	var configPath string
 
 	root := &cobra.Command{
 		Use:   "agentflow",
@@ -19,10 +18,9 @@ func NewRootCommand() *cobra.Command {
 	}
 
 	root.PersistentFlags().StringVar(&repoPath, "repo", "", "Path inside the repo to operate on")
-	root.PersistentFlags().StringVar(&configPath, "config", "", "Override global config path")
 
 	appFor := func() *agentflow.App {
-		app, err := agentflow.NewApp(os.Stdin, os.Stdout, os.Stderr, configPath)
+		app, err := agentflow.NewApp(os.Stdin, os.Stdout, os.Stderr)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)

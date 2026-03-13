@@ -36,7 +36,7 @@ func (t *TrustStore) IsTrusted(repoID, repoRoot, fingerprint string) (bool, erro
 	if err := json.Unmarshal(data, &record); err != nil {
 		return false, err
 	}
-	return record.RepoID == repoID && record.RepoRoot == repoRoot && record.ManifestFingerprint == fingerprint, nil
+	return record.RepoID == repoID && record.RepoRoot == repoRoot && record.WorkflowFingerprint == fingerprint, nil
 }
 
 func (t *TrustStore) Save(record TrustRecord) error {
@@ -50,7 +50,7 @@ func (t *TrustStore) Save(record TrustRecord) error {
 	return os.WriteFile(t.path(record.RepoID), append(data, '\n'), 0o644)
 }
 
-func (t *TrustStore) EnsureTrusted(repoID, repoRoot, manifestPath, fingerprint string, entries []string, input io.Reader, output io.Writer) (bool, error) {
+func (t *TrustStore) EnsureTrusted(repoID, repoRoot, configPath, fingerprint string, entries []string, input io.Reader, output io.Writer) (bool, error) {
 	if fingerprint == "" || len(entries) == 0 {
 		return true, nil
 	}
@@ -65,7 +65,7 @@ func (t *TrustStore) EnsureTrusted(repoID, repoRoot, manifestPath, fingerprint s
 	if _, err := fmt.Fprintf(output, "Trust repo commands for %s?\n", repoRoot); err != nil {
 		return false, err
 	}
-	if _, err := fmt.Fprintf(output, "Repo manifest: %s\n", manifestPath); err != nil {
+	if _, err := fmt.Fprintf(output, "Repo config: %s\n", configPath); err != nil {
 		return false, err
 	}
 	if _, err := io.WriteString(output, "Executable entries:\n"); err != nil {
@@ -76,7 +76,7 @@ func (t *TrustStore) EnsureTrusted(repoID, repoRoot, manifestPath, fingerprint s
 			return false, err
 		}
 	}
-	if _, err := io.WriteString(output, "Type 'yes' to trust this repo manifest: "); err != nil {
+	if _, err := io.WriteString(output, "Type 'yes' to trust this repo config: "); err != nil {
 		return false, err
 	}
 	reader := bufio.NewReader(input)
@@ -91,7 +91,7 @@ func (t *TrustStore) EnsureTrusted(repoID, repoRoot, manifestPath, fingerprint s
 	record := TrustRecord{
 		RepoRoot:            repoRoot,
 		RepoID:              repoID,
-		ManifestFingerprint: fingerprint,
+		WorkflowFingerprint: fingerprint,
 		AcceptedAt:          time.Now().UTC(),
 	}
 	if err := t.Save(record); err != nil {

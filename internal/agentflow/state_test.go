@@ -54,7 +54,7 @@ func TestTrustStoreCachesByFingerprint(t *testing.T) {
 	var output bytes.Buffer
 	input := bytes.NewBufferString("yes\n")
 
-	ok, err := store.EnsureTrusted("repo-1234", "/tmp/repo", "/tmp/repo/.agentflow/manifest.toml", "fingerprint-a", []string{"bun install"}, input, &output)
+	ok, err := store.EnsureTrusted("repo-1234", "/tmp/repo", "/tmp/repo/.agentflow/config.toml", "fingerprint-a", []string{"bun install"}, input, &output)
 	if err != nil {
 		t.Fatalf("EnsureTrusted returned error: %v", err)
 	}

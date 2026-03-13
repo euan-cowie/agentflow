@@ -3,94 +3,39 @@ package agentflow
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-func TestLoadGlobalConfigRejectsManifestSections(t *testing.T) {
+func TestLoadConfigRejectsUnknownFields(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
-	if err := os.WriteFile(path, []byte("[commands]\nverify_quick = \"make test\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("[unknown]\nvalue = 1\n"), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
-	_, _, _, err := loadTOMLConfig[GlobalConfig](path)
+	_, _, _, err := loadTOMLConfig[ConfigFile](path)
 	if err == nil {
 		t.Fatal("expected unknown field error")
 	}
 }
 
-func TestLoadRepoConfigRejectsManifestSections(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.toml")
-	if err := os.WriteFile(path, []byte("[env]\ntargets = [{ path = \".env.agentflow\" }]\n"), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-
-	_, _, _, err := loadTOMLConfig[RepoConfigFile](path)
-	if err == nil {
-		t.Fatal("expected unknown field error")
-	}
-}
-
-func TestLoadManifestRejectsRepoSection(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "manifest.toml")
-	if err := os.WriteFile(path, []byte("[repo]\nname = \"demo\"\n"), 0o644); err != nil {
-		t.Fatalf("write manifest: %v", err)
-	}
-
-	_, _, _, err := loadTOMLConfig[ManifestFile](path)
-	if err == nil {
-		t.Fatal("expected unknown field error")
-	}
-}
-
-func TestResolveRuntimeConfigMergesGlobalRepoAndManifest(t *testing.T) {
-	configHome := filepath.Join(t.TempDir(), "config-home")
-	t.Setenv("AGENTFLOW_CONFIG_HOME", configHome)
+func TestResolveRuntimeConfigMergesRepoConfigWithBuiltins(t *testing.T) {
 	t.Setenv("AGENTFLOW_STATE_HOME", filepath.Join(t.TempDir(), "state-home"))
-
-	globalPath := filepath.Join(configHome, "config.toml")
-	if err := os.MkdirAll(filepath.Dir(globalPath), 0o755); err != nil {
-		t.Fatalf("mkdir global config dir: %v", err)
-	}
-	globalConfig := `
-[defaults.repo]
-base_branch = "origin/develop"
-worktree_root = "{{agentflow_state_home}}/worktrees/{{repo_id}}"
-default_surface = "web"
-
-[defaults.agents.default]
-command = "codex --no-alt-screen -s workspace-write -a on-request"
-
-[defaults.requirements]
-binaries = ["bun"]
-`
-	if err := os.WriteFile(globalPath, []byte(globalConfig), 0o644); err != nil {
-		t.Fatalf("write global config: %v", err)
-	}
 
 	repoRoot := filepath.Join(t.TempDir(), "repo")
 	if err := os.MkdirAll(filepath.Join(repoRoot, ".agentflow"), 0o755); err != nil {
 		t.Fatalf("mkdir repo config dir: %v", err)
 	}
-	repoConfig := `
+	config := `
 [repo]
 name = "agentflow"
 base_branch = "main"
 branch_prefix = "feature"
 default_surface = "cli"
-`
-	if err := os.WriteFile(filepath.Join(repoRoot, ".agentflow", "config.toml"), []byte(repoConfig), 0o644); err != nil {
-		t.Fatalf("write repo config: %v", err)
-	}
-	manifest := `
+
 [env]
 targets = [{ path = ".env.agentflow" }]
 
@@ -100,38 +45,153 @@ verify_quick = "go test ./..."
 [requirements]
 binaries = ["go"]
 `
-	if err := os.WriteFile(filepath.Join(repoRoot, ".agentflow", "manifest.toml"), []byte(manifest), 0o644); err != nil {
-		t.Fatalf("write manifest: %v", err)
+	if err := os.WriteFile(filepath.Join(repoRoot, ".agentflow", "config.toml"), []byte(config), 0o644); err != nil {
+		t.Fatalf("write repo config: %v", err)
 	}
 
-	runtime, err := resolveRuntimeConfig(repoRoot, "")
+	runtime, err := resolveRuntimeConfig(repoRoot)
 	if err != nil {
 		t.Fatalf("resolveRuntimeConfig returned error: %v", err)
 	}
-	if runtime.GlobalConfigPath != globalPath {
-		t.Fatalf("unexpected global config path: %q", runtime.GlobalConfigPath)
+	if runtime.ConfigPath != canonicalPath(filepath.Join(repoRoot, ".agentflow", "config.toml")) {
+		t.Fatalf("unexpected config path: %q", runtime.ConfigPath)
 	}
-	if !runtime.RepoConfigExists || !runtime.ManifestExists {
-		t.Fatalf("expected repo config and manifest to exist: %+v", runtime)
+	if !runtime.ConfigExists {
+		t.Fatal("expected repo config to exist")
 	}
 	if runtime.EffectiveConfig.Repo.BaseBranch != "main" {
 		t.Fatalf("expected repo config to override base branch, got %q", runtime.EffectiveConfig.Repo.BaseBranch)
 	}
 	if runtime.EffectiveConfig.Repo.BranchPrefix != "feature" {
-		t.Fatalf("expected repo branch prefix, got %q", runtime.EffectiveConfig.Repo.BranchPrefix)
+		t.Fatalf("expected branch prefix, got %q", runtime.EffectiveConfig.Repo.BranchPrefix)
 	}
 	if runtime.EffectiveConfig.Repo.DefaultSurface != "cli" {
-		t.Fatalf("expected repo config to override default surface, got %q", runtime.EffectiveConfig.Repo.DefaultSurface)
+		t.Fatalf("expected default surface override, got %q", runtime.EffectiveConfig.Repo.DefaultSurface)
 	}
-	expectedWorktreeRoot := "{{agentflow_state_home}}/worktrees/{{repo_id}}"
-	if runtime.EffectiveConfig.Repo.WorktreeRoot != expectedWorktreeRoot {
-		t.Fatalf("expected global config to set worktree root, got %q", runtime.EffectiveConfig.Repo.WorktreeRoot)
+	if runtime.EffectiveConfig.Repo.WorktreeRoot != defaultWorktreeRootTemplate {
+		t.Fatalf("expected built-in worktree root, got %q", runtime.EffectiveConfig.Repo.WorktreeRoot)
 	}
 	if runtime.EffectiveConfig.Commands["verify_quick"] != "go test ./..." {
-		t.Fatalf("expected manifest command, got %q", runtime.EffectiveConfig.Commands["verify_quick"])
+		t.Fatalf("expected config command, got %q", runtime.EffectiveConfig.Commands["verify_quick"])
 	}
-	if !contains(runtime.EffectiveConfig.Requirements.Binaries, "bun") || !contains(runtime.EffectiveConfig.Requirements.Binaries, "go") {
+	if !contains(runtime.EffectiveConfig.Requirements.Binaries, "git") || !contains(runtime.EffectiveConfig.Requirements.Binaries, "go") {
 		t.Fatalf("expected merged requirements, got %v", runtime.EffectiveConfig.Requirements.Binaries)
+	}
+}
+
+func TestResolveRuntimeConfigRejectsLegacyManifestFile(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".agentflow"), 0o755); err != nil {
+		t.Fatalf("mkdir repo config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoRoot, ".agentflow", "manifest.toml"), []byte("[env]\ntargets = [{ path = \".env.agentflow\" }]\n"), 0o644); err != nil {
+		t.Fatalf("write legacy manifest: %v", err)
+	}
+
+	_, err := resolveRuntimeConfig(repoRoot)
+	if err == nil {
+		t.Fatal("expected legacy manifest error")
+	}
+	if !strings.Contains(err.Error(), "merge it into") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestWorkflowFingerprintIgnoresRepoAndRequirementsSections(t *testing.T) {
+	t.Parallel()
+
+	base := ConfigFile{
+		Repo: RepoConfig{
+			Name:       "demo",
+			BaseBranch: "main",
+		},
+		Env: EnvConfig{
+			Targets: []EnvTargetConfig{{Path: ".env.agentflow"}},
+		},
+	}
+	first, err := workflowFingerprint(base)
+	if err != nil {
+		t.Fatalf("workflowFingerprint returned error: %v", err)
+	}
+
+	changed := base
+	changed.Repo.BaseBranch = "develop"
+	changed.Requirements.Binaries = []string{"go"}
+	second, err := workflowFingerprint(changed)
+	if err != nil {
+		t.Fatalf("workflowFingerprint returned error: %v", err)
+	}
+
+	if first != second {
+		t.Fatalf("expected repo/requirements changes to be ignored, got %q vs %q", first, second)
+	}
+}
+
+func TestWorkflowFingerprintChangesForWorkflowSections(t *testing.T) {
+	t.Parallel()
+
+	cfg := ConfigFile{
+		Env: EnvConfig{
+			Targets: []EnvTargetConfig{{Path: ".env.agentflow"}},
+		},
+	}
+	first, err := workflowFingerprint(cfg)
+	if err != nil {
+		t.Fatalf("workflowFingerprint returned error: %v", err)
+	}
+
+	cfg.Commands = map[string]string{"verify_quick": "go test ./..."}
+	second, err := workflowFingerprint(cfg)
+	if err != nil {
+		t.Fatalf("workflowFingerprint returned error: %v", err)
+	}
+
+	if first == second {
+		t.Fatal("expected workflow fingerprint to change when workflow sections change")
+	}
+}
+
+func TestWorkflowTrustEntriesIncludeSideEffectfulWorkflow(t *testing.T) {
+	t.Parallel()
+
+	cfg := ConfigFile{
+		Bootstrap: BootstrapConfig{
+			Commands: []string{"bun install"},
+			EnvFiles: []EnvFileMapping{{From: ".env.example", To: ".env.local"}},
+		},
+		Env: EnvConfig{
+			Targets: []EnvTargetConfig{{Path: ".env.agentflow"}},
+		},
+		Ports: PortsConfig{
+			Bindings: []PortBindingConfig{{Target: ".env.agentflow", Key: "PORT", Start: 4101, End: 4199}},
+		},
+		Commands: map[string]string{"verify_quick": "go test ./..."},
+		Agents: map[string]AgentConfig{
+			"default": {Command: "codex --no-alt-screen"},
+		},
+		Tmux: TmuxConfig{
+			SessionName: "{{repo}}-{{task}}",
+			Windows:     []TmuxWindowConfig{{Name: "editor", Command: "nvim ."}},
+		},
+	}
+
+	entries := workflowTrustEntries(cfg)
+	expected := []string{
+		"bootstrap command: bun install",
+		"bootstrap env file: .env.example -> .env.local",
+		"managed env target: .env.agentflow",
+		"port binding: PORT -> .env.agentflow [4101-4199]",
+		"command verify_quick: go test ./...",
+		"agent default: codex --no-alt-screen",
+		"tmux session: {{repo}}-{{task}}",
+		"tmux window editor: nvim .",
+	}
+	for _, want := range expected {
+		if !contains(entries, want) {
+			t.Fatalf("expected trust entries to include %q, got %v", want, entries)
+		}
 	}
 }
 
@@ -257,112 +317,67 @@ func TestResolveWorktreeRootUsesDeterministicStateHomeDefault(t *testing.T) {
 	}
 }
 
-func TestStateAndConfigRootsRespectEnvironment(t *testing.T) {
+func TestStateRootRespectsEnvironment(t *testing.T) {
 	t.Setenv("AGENTFLOW_STATE_HOME", filepath.Join(t.TempDir(), "af-state"))
-	t.Setenv("AGENTFLOW_CONFIG_HOME", filepath.Join(t.TempDir(), "af-config"))
 
 	stateRoot, err := stateRootPath()
 	if err != nil {
 		t.Fatalf("stateRootPath returned error: %v", err)
 	}
-	configPath, err := globalConfigPath()
-	if err != nil {
-		t.Fatalf("globalConfigPath returned error: %v", err)
-	}
 
 	if stateRoot != filepath.Clean(os.Getenv("AGENTFLOW_STATE_HOME")) {
 		t.Fatalf("unexpected state root: %q", stateRoot)
 	}
-	expectedConfig := filepath.Join(filepath.Clean(os.Getenv("AGENTFLOW_CONFIG_HOME")), "config.toml")
-	if configPath != expectedConfig {
-		t.Fatalf("unexpected config path: %q", configPath)
-	}
 }
 
-func TestResolvedGlobalConfigPathUsesOverride(t *testing.T) {
-	t.Parallel()
-
-	path, err := ResolvedGlobalConfigPath("../agentflow.toml")
-	if err != nil {
-		t.Fatalf("ResolvedGlobalConfigPath returned error: %v", err)
-	}
-	if path != filepath.Clean("../agentflow.toml") {
-		t.Fatalf("unexpected path: %q", path)
-	}
-}
-
-func TestSampleConfigsParse(t *testing.T) {
+func TestSampleConfigParses(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-
-	globalPath := filepath.Join(dir, "global.toml")
-	if err := os.WriteFile(globalPath, []byte(SampleGlobalConfig()), 0o644); err != nil {
-		t.Fatalf("write global sample: %v", err)
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte(SampleConfig("/tmp/agentflow")), 0o644); err != nil {
+		t.Fatalf("write sample config: %v", err)
 	}
-	globalCfg, _, globalExists, err := loadTOMLConfig[GlobalConfig](globalPath)
+	cfg, _, exists, err := loadTOMLConfig[ConfigFile](path)
 	if err != nil {
-		t.Fatalf("load global sample: %v", err)
+		t.Fatalf("load sample config: %v", err)
 	}
-	if !globalExists || globalCfg.Defaults.Repo.WorktreeRoot != defaultWorktreeRootTemplate {
-		t.Fatalf("unexpected global sample: %+v", globalCfg)
-	}
-
-	repoPath := filepath.Join(dir, "config.toml")
-	if err := os.WriteFile(repoPath, []byte(SampleRepoConfig("/tmp/agentflow")), 0o644); err != nil {
-		t.Fatalf("write repo sample: %v", err)
-	}
-	repoCfg, _, repoExists, err := loadTOMLConfig[RepoConfigFile](repoPath)
-	if err != nil {
-		t.Fatalf("load repo sample: %v", err)
-	}
-	if !repoExists || repoCfg.Repo.Name == "" {
-		t.Fatalf("unexpected repo sample: %+v", repoCfg)
-	}
-
-	manifestPath := filepath.Join(dir, "manifest.toml")
-	if err := os.WriteFile(manifestPath, []byte(SampleManifest()), 0o644); err != nil {
-		t.Fatalf("write manifest sample: %v", err)
-	}
-	manifestCfg, _, manifestExists, err := loadTOMLConfig[ManifestFile](manifestPath)
-	if err != nil {
-		t.Fatalf("load manifest sample: %v", err)
-	}
-	if !manifestExists || len(manifestCfg.Env.Targets) != 1 {
-		t.Fatalf("unexpected manifest sample: %+v", manifestCfg)
+	if !exists || cfg.Repo.Name == "" || len(cfg.Env.Targets) != 1 {
+		t.Fatalf("unexpected sample config: %+v", cfg)
 	}
 }
 
-func TestWriteConfigHelpersWriteExpectedPaths(t *testing.T) {
-	configHome := filepath.Join(t.TempDir(), "config-home")
-	t.Setenv("AGENTFLOW_CONFIG_HOME", configHome)
-
-	globalPath, err := WriteGlobalConfig("", false)
-	if err != nil {
-		t.Fatalf("WriteGlobalConfig returned error: %v", err)
-	}
-	if globalPath != filepath.Join(configHome, "config.toml") {
-		t.Fatalf("unexpected global path: %q", globalPath)
-	}
-
+func TestWriteConfigWritesExpectedPath(t *testing.T) {
 	repoRoot := filepath.Join(t.TempDir(), "repo")
 	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
 		t.Fatalf("mkdir repo root: %v", err)
 	}
-	repoPath, err := WriteRepoConfig(repoRoot, false)
+	path, err := WriteConfig(repoRoot, false)
 	if err != nil {
-		t.Fatalf("WriteRepoConfig returned error: %v", err)
+		t.Fatalf("WriteConfig returned error: %v", err)
 	}
-	if repoPath != filepath.Join(repoRoot, ".agentflow", "config.toml") {
-		t.Fatalf("unexpected repo config path: %q", repoPath)
+	if path != filepath.Join(repoRoot, ".agentflow", "config.toml") {
+		t.Fatalf("unexpected config path: %q", path)
 	}
+}
 
-	manifestPath, err := WriteManifest(repoRoot, false)
+func TestRenderEffectiveConfigOmitsEmptyFields(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultEffectiveConfig()
+	content, err := RenderEffectiveConfig(cfg, "toml")
 	if err != nil {
-		t.Fatalf("WriteManifest returned error: %v", err)
+		t.Fatalf("RenderEffectiveConfig returned error: %v", err)
 	}
-	if manifestPath != filepath.Join(repoRoot, ".agentflow", "manifest.toml") {
-		t.Fatalf("unexpected manifest path: %q", manifestPath)
+	for _, unexpected := range []string{
+		"agent = ''",
+		"command = ''",
+		"bindings = []",
+		"mcp_servers = []",
+	} {
+		if strings.Contains(content, unexpected) {
+			t.Fatalf("expected rendered config to omit %q, got:\n%s", unexpected, content)
+		}
 	}
 }
 
