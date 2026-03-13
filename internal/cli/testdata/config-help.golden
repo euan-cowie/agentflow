@@ -1,0 +1,19 @@
+Inspect or write repo config
+
+Usage:
+  agentflow config [flags]
+  agentflow config [command]
+
+Available Commands:
+  effective   Inspect the merged effective config
+  path        Print the repo config path
+  show        Print the repo config file
+  write       Write the sample repo config
+
+Flags:
+  -h, --help   help for config
+
+Global Flags:
+      --repo string   Path inside the repo to operate on
+
+Use "agentflow config [command] --help" for more information about a command.

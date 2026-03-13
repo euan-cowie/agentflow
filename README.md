@@ -50,6 +50,8 @@ agentflow config effective
 
 Repo config is optional. If `.agentflow/config.toml` is missing, agentflow falls back to built-ins.
 
+For a section-by-section config reference, see [docs/config.md](/Users/euan-cowie/Projects/agentflow/docs/config.md).
+
 Legacy note:
 
 - `.agentflow/manifest.toml` is no longer supported.
@@ -128,3 +130,4 @@ mcp_servers = ["linear"]
 - Ports are treated as agentflow-managed preferred ports, not hard socket reservations.
 - `worktree_root` supports `{{agentflow_state_home}}`, `{{repo_id}}`, and `{{repo}}`.
 - `env.targets` declares the agentflow-managed env files for the task, and `ports.bindings` attaches generated ports to those targets.
+- Repo-local Codex guidance for CLI/docs sync lives in [AGENTS.md](/Users/euan-cowie/Projects/agentflow/AGENTS.md) and [.agentflow/skills/cli-doc-sync/SKILL.md](/Users/euan-cowie/Projects/agentflow/.agentflow/skills/cli-doc-sync/SKILL.md).

@@ -1,0 +1,24 @@
+Spin up repo-driven agent workspaces
+
+Usage:
+  agentflow [command]
+
+Available Commands:
+  attach      Attach to the tmux session for a task
+  codex       Jump to the primary Codex window for a task
+  completion  Generate the autocompletion script for the specified shell
+  config      Inspect or write repo config
+  doctor      Check required binaries and repo configuration
+  down        Tear down a task worktree and session
+  help        Help about any command
+  list        List tracked tasks
+  repair      Repair drift between task state, worktree metadata, and tmux
+  review      Run the configured review command for a task
+  up          Create or resume a task worktree and tmux session
+  verify      Run the configured verify command for a task
+
+Flags:
+  -h, --help          help for agentflow
+      --repo string   Path inside the repo to operate on
+
+Use "agentflow [command] --help" for more information about a command.
