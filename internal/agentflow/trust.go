@@ -65,7 +65,7 @@ func (t *TrustStore) EnsureTrusted(repoID, repoRoot, manifestPath, fingerprint s
 	if _, err := fmt.Fprintf(output, "Trust repo commands for %s?\n", repoRoot); err != nil {
 		return false, err
 	}
-	if _, err := fmt.Fprintf(output, "Manifest: %s\n", manifestPath); err != nil {
+	if _, err := fmt.Fprintf(output, "Repo manifest: %s\n", manifestPath); err != nil {
 		return false, err
 	}
 	if _, err := io.WriteString(output, "Executable entries:\n"); err != nil {
@@ -76,7 +76,7 @@ func (t *TrustStore) EnsureTrusted(repoID, repoRoot, manifestPath, fingerprint s
 			return false, err
 		}
 	}
-	if _, err := io.WriteString(output, "Type 'yes' to trust this manifest: "); err != nil {
+	if _, err := io.WriteString(output, "Type 'yes' to trust this repo manifest: "); err != nil {
 		return false, err
 	}
 	reader := bufio.NewReader(input)

@@ -36,7 +36,7 @@ func TestResolveManualTaskDeterministic(t *testing.T) {
 func TestBranchAndSessionNamesIncludeStableID(t *testing.T) {
 	t.Parallel()
 
-	cfg := defaultWorkflowConfig()
+	cfg := defaultEffectiveConfig()
 	cfg.Repo.Name = "Coach Connect"
 	cfg.Repo.BranchPrefix = "feature"
 

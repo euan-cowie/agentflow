@@ -200,6 +200,219 @@ func repairCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
 	}
 }
 
+func configCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "config",
+		Short: "Inspect global, repo, manifest, and effective config",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			overview, err := app().ConfigOverview(cmd.Context(), *repoPath)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stdout, "global\t%s\texists=%t\trole=personal-defaults\n", overview.Global.Path, overview.Global.Exists)
+			if overview.Repo != nil {
+				fmt.Fprintf(os.Stdout, "repo\t%s\texists=%t\trole=repo-conventions\n", overview.Repo.Path, overview.Repo.Exists)
+			}
+			if overview.Manifest != nil {
+				fmt.Fprintf(os.Stdout, "manifest\t%s\texists=%t\trole=executable-workflow\n", overview.Manifest.Path, overview.Manifest.Exists)
+			}
+			return nil
+		},
+	}
+	cmd.AddCommand(configGlobalCommand(app))
+	cmd.AddCommand(configRepoCommand(app, repoPath))
+	cmd.AddCommand(configManifestCommand(app, repoPath))
+	cmd.AddCommand(configEffectiveCommand(app, repoPath))
+	return cmd
+}
+
+func configGlobalCommand(app func() *agentflow.App) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "global",
+		Short: "Inspect or write global config",
+	}
+	cmd.AddCommand(&cobra.Command{
+		Use:   "path",
+		Short: "Print the global config path",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, _, _, err := app().ShowGlobalConfig()
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(os.Stdout, path)
+			return nil
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "show",
+		Short: "Print the global config file",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, content, exists, err := app().ShowGlobalConfig()
+			if err != nil {
+				return err
+			}
+			if !exists {
+				fmt.Fprintf(os.Stdout, "missing\t%s\nhint=run 'agentflow config global write'\n", path)
+				return nil
+			}
+			fmt.Fprint(os.Stdout, content)
+			return nil
+		},
+	})
+	var force bool
+	writeCmd := &cobra.Command{
+		Use:   "write",
+		Short: "Write the sample global config",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, err := app().WriteGlobalConfig(force)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(os.Stdout, path)
+			return nil
+		},
+	}
+	writeCmd.Flags().BoolVar(&force, "force", false, "Overwrite an existing file")
+	cmd.AddCommand(writeCmd)
+	return cmd
+}
+
+func configRepoCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "repo",
+		Short: "Inspect or write repo config",
+	}
+	cmd.AddCommand(&cobra.Command{
+		Use:   "path",
+		Short: "Print the repo config path",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, _, _, err := app().ShowRepoConfig(cmd.Context(), *repoPath)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(os.Stdout, path)
+			return nil
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "show",
+		Short: "Print the repo config file",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, content, exists, err := app().ShowRepoConfig(cmd.Context(), *repoPath)
+			if err != nil {
+				return err
+			}
+			if !exists {
+				fmt.Fprintf(os.Stdout, "missing\t%s\nhint=run 'agentflow config repo write'\n", path)
+				return nil
+			}
+			fmt.Fprint(os.Stdout, content)
+			return nil
+		},
+	})
+	var force bool
+	writeCmd := &cobra.Command{
+		Use:   "write",
+		Short: "Write the sample repo config",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, err := app().WriteRepoConfig(cmd.Context(), *repoPath, force)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(os.Stdout, path)
+			return nil
+		},
+	}
+	writeCmd.Flags().BoolVar(&force, "force", false, "Overwrite an existing file")
+	cmd.AddCommand(writeCmd)
+	return cmd
+}
+
+func configManifestCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "manifest",
+		Short: "Inspect or write repo manifest",
+	}
+	cmd.AddCommand(&cobra.Command{
+		Use:   "path",
+		Short: "Print the repo manifest path",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, _, _, err := app().ShowManifest(cmd.Context(), *repoPath)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(os.Stdout, path)
+			return nil
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "show",
+		Short: "Print the repo manifest file",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, content, exists, err := app().ShowManifest(cmd.Context(), *repoPath)
+			if err != nil {
+				return err
+			}
+			if !exists {
+				fmt.Fprintf(os.Stdout, "missing\t%s\nhint=run 'agentflow config manifest write'\n", path)
+				return nil
+			}
+			fmt.Fprint(os.Stdout, content)
+			return nil
+		},
+	})
+	var force bool
+	writeCmd := &cobra.Command{
+		Use:   "write",
+		Short: "Write the sample repo manifest",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, err := app().WriteManifest(cmd.Context(), *repoPath, force)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(os.Stdout, path)
+			return nil
+		},
+	}
+	writeCmd.Flags().BoolVar(&force, "force", false, "Overwrite an existing file")
+	cmd.AddCommand(writeCmd)
+	return cmd
+}
+
+func configEffectiveCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "effective",
+		Short: "Inspect the merged effective config",
+	}
+	var format string
+	showCmd := &cobra.Command{
+		Use:   "show",
+		Short: "Print the merged effective config for the current repo",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			content, err := app().ShowEffectiveConfig(cmd.Context(), *repoPath, format)
+			if err != nil {
+				return err
+			}
+			fmt.Fprint(os.Stdout, content)
+			return nil
+		},
+	}
+	showCmd.Flags().StringVar(&format, "format", "toml", "Output format: toml or json")
+	cmd.AddCommand(showCmd)
+	return cmd
+}
+
 func printSummary(summary agentflow.TaskSummary) {
 	fmt.Fprintf(os.Stdout, "task_id=%s\nstatus=%s\nrepo=%s\nworktree=%s\nbranch=%s\nsession=%s\nsurface=%s\n", summary.TaskID, summary.Status, summary.RepoRoot, summary.Worktree, summary.Branch, summary.Session, summary.Surface)
 	if summary.ManifestDrift {

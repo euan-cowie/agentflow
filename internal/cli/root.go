@@ -39,6 +39,7 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(listCommand(func() *agentflow.App { return appFor() }, &repoPath))
 	root.AddCommand(doctorCommand(func() *agentflow.App { return appFor() }, &repoPath))
 	root.AddCommand(repairCommand(func() *agentflow.App { return appFor() }, &repoPath))
+	root.AddCommand(configCommand(func() *agentflow.App { return appFor() }, &repoPath))
 
 	root.SetContext(context.Background())
 	return root

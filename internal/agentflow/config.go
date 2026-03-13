@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -15,27 +16,23 @@ import (
 
 const defaultWorktreeRootTemplate = "{{agentflow_state_home}}/worktrees/{{repo_id}}"
 
-func defaultWorkflowConfig() WorkflowConfig {
-	return WorkflowConfig{
+func defaultEffectiveConfig() EffectiveConfig {
+	return EffectiveConfig{
 		Repo: RepoConfig{
 			BaseBranch:     "origin/main",
 			WorktreeRoot:   defaultWorktreeRootTemplate,
 			DefaultSurface: "default",
 		},
 		Env: EnvConfig{
-			ManagedFile: ".env.agentflow",
+			Targets: []EnvTargetConfig{{Path: ".env.agentflow"}},
 		},
-		Ports: PortsConfig{
-			Key:   "AGENTFLOW_PORT",
-			Start: 4101,
-			End:   4199,
-		},
+		Ports:    PortsConfig{},
 		Commands: map[string]string{},
 		Agents: map[string]AgentConfig{
 			"default": {
 				Runner:       "codex",
 				Command:      "codex --no-alt-screen -s workspace-write -a on-request",
-				PrimePrompt:  "Read AGENTS.md and any relevant .agents content before acting.",
+				PrimePrompt:  "Read AGENTS.md and any relevant repo instructions before acting.",
 				ResumePrompt: "Resume the current task and re-check AGENTS.md if the repo changed.",
 			},
 		},
@@ -53,108 +50,118 @@ func defaultWorkflowConfig() WorkflowConfig {
 	}
 }
 
-func mergeWorkflowConfig(base, override WorkflowConfig) WorkflowConfig {
+func applyGlobalConfig(base EffectiveConfig, cfg GlobalConfig) EffectiveConfig {
 	out := base
-
-	if override.Repo.Name != "" {
-		out.Repo.Name = override.Repo.Name
+	if cfg.Defaults.Repo.BaseBranch != "" {
+		out.Repo.BaseBranch = cfg.Defaults.Repo.BaseBranch
 	}
-	if override.Repo.BaseBranch != "" {
-		out.Repo.BaseBranch = override.Repo.BaseBranch
+	if cfg.Defaults.Repo.WorktreeRoot != "" {
+		out.Repo.WorktreeRoot = cfg.Defaults.Repo.WorktreeRoot
 	}
-	if override.Repo.WorktreeRoot != "" {
-		out.Repo.WorktreeRoot = override.Repo.WorktreeRoot
+	if cfg.Defaults.Repo.DefaultSurface != "" {
+		out.Repo.DefaultSurface = cfg.Defaults.Repo.DefaultSurface
 	}
-	if override.Repo.BranchPrefix != "" {
-		out.Repo.BranchPrefix = override.Repo.BranchPrefix
+	if len(cfg.Defaults.Agents) > 0 {
+		out.Agents = mergeAgentConfigs(out.Agents, cfg.Defaults.Agents)
 	}
-	if override.Repo.DefaultSurface != "" {
-		out.Repo.DefaultSurface = override.Repo.DefaultSurface
+	if cfg.Defaults.Tmux.SessionName != "" {
+		out.Tmux.SessionName = cfg.Defaults.Tmux.SessionName
 	}
-
-	if len(override.Bootstrap.Commands) > 0 {
-		out.Bootstrap.Commands = append([]string(nil), override.Bootstrap.Commands...)
+	if len(cfg.Defaults.Tmux.Windows) > 0 {
+		out.Tmux.Windows = append([]TmuxWindowConfig(nil), cfg.Defaults.Tmux.Windows...)
 	}
-	if len(override.Bootstrap.EnvFiles) > 0 {
-		out.Bootstrap.EnvFiles = append([]EnvFileMapping(nil), override.Bootstrap.EnvFiles...)
+	if len(cfg.Defaults.Requirements.Binaries) > 0 {
+		out.Requirements.Binaries = uniqueStrings(append(out.Requirements.Binaries, cfg.Defaults.Requirements.Binaries...))
 	}
-
-	if override.Env.ManagedFile != "" {
-		out.Env.ManagedFile = override.Env.ManagedFile
+	if len(cfg.Defaults.Requirements.MCPServers) > 0 {
+		out.Requirements.MCPServers = uniqueStrings(append(out.Requirements.MCPServers, cfg.Defaults.Requirements.MCPServers...))
 	}
-	if len(override.Env.Targets) > 0 {
-		out.Env.Targets = append([]EnvTargetConfig(nil), override.Env.Targets...)
-	}
-
-	if override.Ports.Enabled {
-		out.Ports.Enabled = true
-	}
-	if override.Ports.File != "" {
-		out.Ports.File = override.Ports.File
-	}
-	if override.Ports.Key != "" {
-		out.Ports.Key = override.Ports.Key
-	}
-	if override.Ports.Start != 0 {
-		out.Ports.Start = override.Ports.Start
-	}
-	if override.Ports.End != 0 {
-		out.Ports.End = override.Ports.End
-	}
-	if len(override.Ports.Bindings) > 0 {
-		out.Ports.Bindings = append([]PortBindingConfig(nil), override.Ports.Bindings...)
-	}
-
-	if len(override.Commands) > 0 {
-		if out.Commands == nil {
-			out.Commands = map[string]string{}
-		}
-		for key, value := range override.Commands {
-			out.Commands[key] = value
-		}
-	}
-
-	if len(override.Agents) > 0 {
-		if out.Agents == nil {
-			out.Agents = map[string]AgentConfig{}
-		}
-		for key, value := range override.Agents {
-			baseAgent := out.Agents[key]
-			if value.Runner != "" {
-				baseAgent.Runner = value.Runner
-			}
-			if value.Command != "" {
-				baseAgent.Command = value.Command
-			}
-			if value.PrimePrompt != "" {
-				baseAgent.PrimePrompt = value.PrimePrompt
-			}
-			if value.ResumePrompt != "" {
-				baseAgent.ResumePrompt = value.ResumePrompt
-			}
-			out.Agents[key] = baseAgent
-		}
-	}
-
-	if override.Tmux.SessionName != "" {
-		out.Tmux.SessionName = override.Tmux.SessionName
-	}
-	if len(override.Tmux.Windows) > 0 {
-		out.Tmux.Windows = append([]TmuxWindowConfig(nil), override.Tmux.Windows...)
-	}
-
-	if len(override.Requirements.Binaries) > 0 {
-		out.Requirements.Binaries = uniqueStrings(append(out.Requirements.Binaries, override.Requirements.Binaries...))
-	}
-	if len(override.Requirements.MCPServers) > 0 {
-		out.Requirements.MCPServers = uniqueStrings(append(out.Requirements.MCPServers, override.Requirements.MCPServers...))
-	}
-
 	return out
 }
 
-func loadWorkflowConfig(path string) (WorkflowConfig, string, bool, error) {
-	var cfg WorkflowConfig
+func applyRepoConfig(base EffectiveConfig, cfg RepoConfigFile) EffectiveConfig {
+	out := base
+	if cfg.Repo.Name != "" {
+		out.Repo.Name = cfg.Repo.Name
+	}
+	if cfg.Repo.BaseBranch != "" {
+		out.Repo.BaseBranch = cfg.Repo.BaseBranch
+	}
+	if cfg.Repo.BranchPrefix != "" {
+		out.Repo.BranchPrefix = cfg.Repo.BranchPrefix
+	}
+	if cfg.Repo.DefaultSurface != "" {
+		out.Repo.DefaultSurface = cfg.Repo.DefaultSurface
+	}
+	return out
+}
+
+func applyManifest(base EffectiveConfig, manifest ManifestFile) EffectiveConfig {
+	out := base
+	if len(manifest.Bootstrap.Commands) > 0 {
+		out.Bootstrap.Commands = append([]string(nil), manifest.Bootstrap.Commands...)
+	}
+	if len(manifest.Bootstrap.EnvFiles) > 0 {
+		out.Bootstrap.EnvFiles = append([]EnvFileMapping(nil), manifest.Bootstrap.EnvFiles...)
+	}
+	if len(manifest.Env.Targets) > 0 {
+		out.Env.Targets = append([]EnvTargetConfig(nil), manifest.Env.Targets...)
+	}
+	if len(manifest.Ports.Bindings) > 0 {
+		out.Ports.Bindings = append([]PortBindingConfig(nil), manifest.Ports.Bindings...)
+	}
+	if len(manifest.Commands) > 0 {
+		if out.Commands == nil {
+			out.Commands = map[string]string{}
+		}
+		for key, value := range manifest.Commands {
+			out.Commands[key] = value
+		}
+	}
+	if len(manifest.Agents) > 0 {
+		out.Agents = mergeAgentConfigs(out.Agents, manifest.Agents)
+	}
+	if manifest.Tmux.SessionName != "" {
+		out.Tmux.SessionName = manifest.Tmux.SessionName
+	}
+	if len(manifest.Tmux.Windows) > 0 {
+		out.Tmux.Windows = append([]TmuxWindowConfig(nil), manifest.Tmux.Windows...)
+	}
+	if len(manifest.Requirements.Binaries) > 0 {
+		out.Requirements.Binaries = uniqueStrings(append(out.Requirements.Binaries, manifest.Requirements.Binaries...))
+	}
+	if len(manifest.Requirements.MCPServers) > 0 {
+		out.Requirements.MCPServers = uniqueStrings(append(out.Requirements.MCPServers, manifest.Requirements.MCPServers...))
+	}
+	return out
+}
+
+func mergeAgentConfigs(base, override map[string]AgentConfig) map[string]AgentConfig {
+	out := map[string]AgentConfig{}
+	for key, value := range base {
+		out[key] = value
+	}
+	for key, value := range override {
+		existing := out[key]
+		if value.Runner != "" {
+			existing.Runner = value.Runner
+		}
+		if value.Command != "" {
+			existing.Command = value.Command
+		}
+		if value.PrimePrompt != "" {
+			existing.PrimePrompt = value.PrimePrompt
+		}
+		if value.ResumePrompt != "" {
+			existing.ResumePrompt = value.ResumePrompt
+		}
+		out[key] = existing
+	}
+	return out
+}
+
+func loadTOMLConfig[T any](path string) (T, string, bool, error) {
+	var cfg T
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return cfg, "", false, nil
@@ -181,62 +188,62 @@ func resolveRuntimeConfig(repoRoot string, configOverridePath string) (RuntimeCo
 	if err != nil {
 		return RuntimeConfig{}, err
 	}
-	cfgPath := configOverridePath
-	if cfgPath == "" {
-		cfgPath, err = globalConfigPath()
-		if err != nil {
-			return RuntimeConfig{}, err
-		}
+	globalPath, err := ResolvedGlobalConfigPath(configOverridePath)
+	if err != nil {
+		return RuntimeConfig{}, err
 	}
+	repoConfigPath := ResolvedRepoConfigPath(canonicalRoot)
+	manifestPath := ResolvedManifestPath(canonicalRoot)
 
-	builtins := defaultWorkflowConfig()
-	globalCfg, _, _, err := loadWorkflowConfig(cfgPath)
+	globalCfg, _, globalExists, err := loadTOMLConfig[GlobalConfig](globalPath)
+	if err != nil {
+		return RuntimeConfig{}, err
+	}
+	repoCfg, repoFingerprint, repoExists, err := loadTOMLConfig[RepoConfigFile](repoConfigPath)
+	if err != nil {
+		return RuntimeConfig{}, err
+	}
+	manifestCfg, manifestFingerprint, manifestExists, err := loadTOMLConfig[ManifestFile](manifestPath)
 	if err != nil {
 		return RuntimeConfig{}, err
 	}
 
-	manifestPath := filepath.Join(canonicalRoot, ".agents", "workflow.toml")
-	manifestCfg, manifestFingerprint, manifestExists, err := loadWorkflowConfig(manifestPath)
-	if err != nil {
+	effective := defaultEffectiveConfig()
+	effective = applyGlobalConfig(effective, globalCfg)
+	effective = applyRepoConfig(effective, repoCfg)
+	effective = applyManifest(effective, manifestCfg)
+	if effective.Repo.Name == "" {
+		effective.Repo.Name = filepath.Base(canonicalRoot)
+	}
+	if strings.TrimSpace(effective.Repo.WorktreeRoot) == "" {
+		effective.Repo.WorktreeRoot = defaultWorktreeRootTemplate
+	}
+	if err := validateEffectiveConfig(effective); err != nil {
 		return RuntimeConfig{}, err
 	}
 
-	merged := mergeWorkflowConfig(builtins, globalCfg)
-	merged = mergeWorkflowConfig(merged, manifestCfg)
-
-	if merged.Repo.Name == "" {
-		merged.Repo.Name = filepath.Base(canonicalRoot)
-	}
-	if merged.Ports.File == "" && len(merged.Env.Targets) == 0 {
-		merged.Ports.File = merged.Env.ManagedFile
-	}
-	if strings.TrimSpace(merged.Repo.WorktreeRoot) == "" {
-		merged.Repo.WorktreeRoot = defaultWorktreeRootTemplate
-	}
-
-	runtime := RuntimeConfig{
-		RepoRoot:            canonicalRoot,
-		RepoID:              repoID(canonicalRoot),
-		ManifestPath:        manifestPath,
-		ManifestExists:      manifestExists,
-		ManifestFingerprint: manifestFingerprint,
-		GlobalConfigPath:    cfgPath,
-		StateRoot:           stateRoot,
-		Config:              merged,
-		ManifestConfig:      manifestCfg,
-	}
-	if err := validateWorkflowConfig(runtime.Config); err != nil {
-		return RuntimeConfig{}, err
-	}
-	return runtime, nil
+	return RuntimeConfig{
+		RepoRoot:              canonicalRoot,
+		RepoID:                repoID(canonicalRoot),
+		RepoConfigPath:        repoConfigPath,
+		RepoConfigExists:      repoExists,
+		RepoConfigFingerprint: repoFingerprint,
+		ManifestPath:          manifestPath,
+		ManifestExists:        manifestExists,
+		ManifestFingerprint:   manifestFingerprint,
+		GlobalConfigPath:      globalPath,
+		GlobalConfigExists:    globalExists,
+		StateRoot:             stateRoot,
+		GlobalConfig:          globalCfg,
+		RepoConfig:            repoCfg,
+		Manifest:              manifestCfg,
+		EffectiveConfig:       effective,
+	}, nil
 }
 
-func validateWorkflowConfig(cfg WorkflowConfig) error {
+func validateEffectiveConfig(cfg EffectiveConfig) error {
 	if cfg.Repo.BaseBranch == "" {
 		return errors.New("repo.base_branch must not be empty")
-	}
-	if cfg.Env.ManagedFile == "" {
-		return errors.New("env.managed_file must not be empty")
 	}
 	managedFiles, err := effectiveManagedEnvFiles(cfg)
 	if err != nil {
@@ -260,22 +267,18 @@ func validateWorkflowConfig(cfg WorkflowConfig) error {
 		}
 		seenTargets[path] = struct{}{}
 	}
-	seenBindingTargets := map[string]struct{}{}
 	for _, binding := range portBindings {
 		if strings.TrimSpace(binding.Target) == "" {
 			return errors.New("port binding target must not be empty")
+		}
+		if _, ok := seenTargets[binding.Target]; !ok {
+			return fmt.Errorf("port binding target %q must also be declared in env.targets", binding.Target)
 		}
 		if strings.TrimSpace(binding.Key) == "" {
 			return fmt.Errorf("port binding for target %q must declare key", binding.Target)
 		}
 		if binding.Start == 0 || binding.End == 0 || binding.End < binding.Start {
 			return fmt.Errorf("port binding %q must describe a valid range", binding.Key)
-		}
-		seenBindingTargets[binding.Target] = struct{}{}
-	}
-	for target := range seenBindingTargets {
-		if _, ok := seenTargets[target]; !ok {
-			return fmt.Errorf("port binding target %q must also be declared in env.targets or env.managed_file", target)
 		}
 	}
 	if len(cfg.Tmux.Windows) == 0 {
@@ -305,8 +308,8 @@ func validateWorkflowConfig(cfg WorkflowConfig) error {
 	return nil
 }
 
-func effectiveManagedEnvFiles(cfg WorkflowConfig) ([]string, error) {
-	paths := make([]string, 0)
+func effectiveManagedEnvFiles(cfg EffectiveConfig) ([]string, error) {
+	paths := make([]string, 0, len(cfg.Env.Targets))
 	for _, target := range cfg.Env.Targets {
 		path := strings.TrimSpace(target.Path)
 		if path == "" {
@@ -315,47 +318,16 @@ func effectiveManagedEnvFiles(cfg WorkflowConfig) ([]string, error) {
 		paths = append(paths, path)
 	}
 	if len(paths) == 0 {
-		path := strings.TrimSpace(cfg.Env.ManagedFile)
-		if path == "" {
-			return nil, errors.New("env.managed_file must not be empty")
-		}
-		paths = append(paths, path)
-	}
-	for _, binding := range cfg.Ports.Bindings {
-		target := strings.TrimSpace(binding.Target)
-		if target != "" {
-			paths = append(paths, target)
-		}
+		return nil, errors.New("env.targets must not be empty")
 	}
 	return uniqueStrings(paths), nil
 }
 
-func effectivePortBindings(cfg WorkflowConfig) ([]PortBindingConfig, error) {
-	if len(cfg.Ports.Bindings) > 0 {
-		return append([]PortBindingConfig(nil), cfg.Ports.Bindings...), nil
-	}
-	if !cfg.Ports.Enabled {
-		return nil, nil
-	}
-	target := strings.TrimSpace(cfg.Ports.File)
-	if target == "" && len(cfg.Env.Targets) > 0 {
-		target = strings.TrimSpace(cfg.Env.Targets[0].Path)
-	}
-	if target == "" {
-		target = strings.TrimSpace(cfg.Env.ManagedFile)
-	}
-	if target == "" {
-		return nil, errors.New("ports.file or env.managed_file must be set when legacy ports are enabled")
-	}
-	return []PortBindingConfig{{
-		Target: target,
-		Key:    cfg.Ports.Key,
-		Start:  cfg.Ports.Start,
-		End:    cfg.Ports.End,
-	}}, nil
+func effectivePortBindings(cfg EffectiveConfig) ([]PortBindingConfig, error) {
+	return append([]PortBindingConfig(nil), cfg.Ports.Bindings...), nil
 }
 
-func manifestExecutableEntries(cfg WorkflowConfig) []string {
+func manifestExecutableEntries(cfg ManifestFile) []string {
 	entries := make([]string, 0)
 	for _, command := range cfg.Bootstrap.Commands {
 		entries = append(entries, command)
@@ -374,4 +346,172 @@ func manifestExecutableEntries(cfg WorkflowConfig) []string {
 		}
 	}
 	return uniqueStrings(entries)
+}
+
+func ResolvedGlobalConfigPath(configOverride string) (string, error) {
+	if strings.TrimSpace(configOverride) != "" {
+		return filepath.Clean(configOverride), nil
+	}
+	return globalConfigPath()
+}
+
+func ResolvedRepoConfigPath(repoRoot string) string {
+	return filepath.Join(filepath.Clean(repoRoot), ".agentflow", "config.toml")
+}
+
+func ResolvedManifestPath(repoRoot string) string {
+	return filepath.Join(filepath.Clean(repoRoot), ".agentflow", "manifest.toml")
+}
+
+func ReadConfigFile(path string) (string, bool, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return string(data), true, nil
+}
+
+func RenderEffectiveConfig(cfg EffectiveConfig, format string) (string, error) {
+	switch format {
+	case "", "toml":
+		var buf bytes.Buffer
+		encoder := toml.NewEncoder(&buf)
+		if err := encoder.Encode(cfg); err != nil {
+			return "", err
+		}
+		return buf.String(), nil
+	case "json":
+		data, err := json.MarshalIndent(cfg, "", "  ")
+		if err != nil {
+			return "", err
+		}
+		return string(append(data, '\n')), nil
+	default:
+		return "", fmt.Errorf("unsupported format %q", format)
+	}
+}
+
+func SampleGlobalConfig() string {
+	return strings.TrimSpace(`
+# Personal defaults for agentflow on this machine.
+
+[defaults.repo]
+base_branch = "origin/main"
+worktree_root = "{{agentflow_state_home}}/worktrees/{{repo_id}}"
+default_surface = "default"
+
+[defaults.agents.default]
+runner = "codex"
+command = "codex --no-alt-screen -s workspace-write -a on-request"
+prime_prompt = "Read AGENTS.md and any relevant repo instructions before acting."
+resume_prompt = "Resume the current task and re-check AGENTS.md if the repo changed."
+
+[defaults.tmux]
+session_name = "{{repo}}-{{task}}-{{id}}"
+
+[[defaults.tmux.windows]]
+name = "editor"
+command = "nvim ."
+
+[[defaults.tmux.windows]]
+name = "verify"
+command = "clear"
+
+[[defaults.tmux.windows]]
+name = "codex"
+agent = "default"
+
+[defaults.requirements]
+binaries = ["git", "tmux", "codex", "nvim"]
+`) + "\n"
+}
+
+func SampleRepoConfig(repoRoot string) string {
+	repoName := slugify(filepath.Base(repoRoot))
+	if repoName == "" {
+		repoName = "repo"
+	}
+	return fmt.Sprintf(strings.TrimSpace(`
+# Checked-in repo conventions for agentflow.
+
+[repo]
+name = %q
+base_branch = "origin/main"
+default_surface = "default"
+`)+"\n", repoName)
+}
+
+func SampleManifest() string {
+	return strings.TrimSpace(`
+# Checked-in executable workflow policy for agentflow.
+
+[env]
+targets = [{ path = ".env.agentflow" }]
+
+[commands]
+review = "make review"
+verify_quick = "make test"
+
+[agents.default]
+runner = "codex"
+command = "codex --no-alt-screen -s workspace-write -a on-request"
+prime_prompt = "Read AGENTS.md and any relevant repo instructions before acting."
+resume_prompt = "Resume the task and re-check local instructions if the repo changed."
+
+[tmux]
+session_name = "{{repo}}-{{task}}-{{id}}"
+
+[[tmux.windows]]
+name = "editor"
+command = "nvim ."
+
+[[tmux.windows]]
+name = "verify"
+command = "clear"
+
+[[tmux.windows]]
+name = "codex"
+agent = "default"
+
+[requirements]
+binaries = ["git", "tmux", "codex", "nvim"]
+`) + "\n"
+}
+
+func writeConfigFile(path string, contents string, force bool) (string, error) {
+	if !force {
+		if _, err := os.Stat(path); err == nil {
+			return "", fmt.Errorf("config already exists at %s", path)
+		}
+	}
+	if err := ensureDir(filepath.Dir(path)); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func WriteGlobalConfig(configOverride string, force bool) (string, error) {
+	path, err := ResolvedGlobalConfigPath(configOverride)
+	if err != nil {
+		return "", err
+	}
+	return writeConfigFile(path, SampleGlobalConfig(), force)
+}
+
+func WriteRepoConfig(repoRoot string, force bool) (string, error) {
+	return writeConfigFile(ResolvedRepoConfigPath(repoRoot), SampleRepoConfig(repoRoot), force)
+}
+
+func WriteManifest(repoRoot string, force bool) (string, error) {
+	return writeConfigFile(ResolvedManifestPath(repoRoot), SampleManifest(), force)
+}
+
+func InitGlobalConfig(configOverride string, force bool) (string, error) {
+	return WriteGlobalConfig(configOverride, force)
 }

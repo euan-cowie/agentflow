@@ -71,8 +71,56 @@ func TestWriteManagedEnvFilesSupportsMultipleTargets(t *testing.T) {
 	}
 }
 
+func TestRemoveManagedEnvFilesRemovesDeclaredTargets(t *testing.T) {
+	t.Parallel()
+
+	worktree := t.TempDir()
+	if _, err := writeManagedEnvFiles(worktree, []string{
+		"apps/web/.env.agentflow",
+		"packages/api/.env.agentflow",
+	}, map[string]map[string]string{
+		"apps/web/.env.agentflow": {
+			"VITE_PORT": "4101",
+		},
+		"packages/api/.env.agentflow": {
+			"PORT": "5101",
+		},
+	}); err != nil {
+		t.Fatalf("writeManagedEnvFiles returned error: %v", err)
+	}
+
+	if err := removeManagedEnvFiles(worktree, []string{
+		"apps/web/.env.agentflow",
+		"packages/api/.env.agentflow",
+	}); err != nil {
+		t.Fatalf("removeManagedEnvFiles returned error: %v", err)
+	}
+
+	for _, target := range []string{
+		"apps/web/.env.agentflow",
+		"packages/api/.env.agentflow",
+	} {
+		if _, err := os.Stat(filepath.Join(worktree, target)); !os.IsNotExist(err) {
+			t.Fatalf("expected %s to be removed, stat err=%v", target, err)
+		}
+	}
+}
+
+func TestRemoveManagedEnvFilesRejectsEscape(t *testing.T) {
+	t.Parallel()
+
+	worktree := t.TempDir()
+	err := removeManagedEnvFiles(worktree, []string{"../outside/.env.agentflow"})
+	if err == nil {
+		t.Fatal("expected removeManagedEnvFiles to reject paths outside the worktree")
+	}
+	if !strings.Contains(err.Error(), "escapes worktree") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestBuildTaskEnvStateAllocatesBindingsPerTarget(t *testing.T) {
-	cfg := defaultWorkflowConfig()
+	cfg := defaultEffectiveConfig()
 	cfg.Env.Targets = []EnvTargetConfig{
 		{Path: "apps/web/.env.agentflow"},
 		{Path: "packages/api/.env.agentflow"},

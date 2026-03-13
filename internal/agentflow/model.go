@@ -10,6 +10,12 @@ type RepoConfig struct {
 	DefaultSurface string `toml:"default_surface" json:"default_surface"`
 }
 
+type GlobalRepoDefaults struct {
+	BaseBranch     string `toml:"base_branch" json:"base_branch"`
+	WorktreeRoot   string `toml:"worktree_root" json:"worktree_root"`
+	DefaultSurface string `toml:"default_surface" json:"default_surface"`
+}
+
 type EnvFileMapping struct {
 	From string `toml:"from" json:"from"`
 	To   string `toml:"to" json:"to"`
@@ -21,8 +27,7 @@ type BootstrapConfig struct {
 }
 
 type EnvConfig struct {
-	ManagedFile string            `toml:"managed_file" json:"managed_file"`
-	Targets     []EnvTargetConfig `toml:"targets" json:"targets"`
+	Targets []EnvTargetConfig `toml:"targets" json:"targets"`
 }
 
 type EnvTargetConfig struct {
@@ -30,11 +35,6 @@ type EnvTargetConfig struct {
 }
 
 type PortsConfig struct {
-	Enabled  bool                `toml:"enabled" json:"enabled"`
-	File     string              `toml:"file" json:"file"`
-	Key      string              `toml:"key" json:"key"`
-	Start    int                 `toml:"start" json:"start"`
-	End      int                 `toml:"end" json:"end"`
 	Bindings []PortBindingConfig `toml:"bindings" json:"bindings"`
 }
 
@@ -68,7 +68,39 @@ type RequirementsConfig struct {
 	MCPServers []string `toml:"mcp_servers" json:"mcp_servers"`
 }
 
-type WorkflowConfig struct {
+type GlobalDefaultsConfig struct {
+	Repo         GlobalRepoDefaults     `toml:"repo" json:"repo"`
+	Agents       map[string]AgentConfig `toml:"agents" json:"agents"`
+	Tmux         TmuxConfig             `toml:"tmux" json:"tmux"`
+	Requirements RequirementsConfig     `toml:"requirements" json:"requirements"`
+}
+
+type GlobalConfig struct {
+	Defaults GlobalDefaultsConfig `toml:"defaults" json:"defaults"`
+}
+
+type RepoConfigFile struct {
+	Repo RepoFileConfig `toml:"repo" json:"repo"`
+}
+
+type RepoFileConfig struct {
+	Name           string `toml:"name" json:"name"`
+	BaseBranch     string `toml:"base_branch" json:"base_branch"`
+	BranchPrefix   string `toml:"branch_prefix" json:"branch_prefix"`
+	DefaultSurface string `toml:"default_surface" json:"default_surface"`
+}
+
+type ManifestFile struct {
+	Bootstrap    BootstrapConfig        `toml:"bootstrap" json:"bootstrap"`
+	Env          EnvConfig              `toml:"env" json:"env"`
+	Ports        PortsConfig            `toml:"ports" json:"ports"`
+	Commands     map[string]string      `toml:"commands" json:"commands"`
+	Agents       map[string]AgentConfig `toml:"agents" json:"agents"`
+	Tmux         TmuxConfig             `toml:"tmux" json:"tmux"`
+	Requirements RequirementsConfig     `toml:"requirements" json:"requirements"`
+}
+
+type EffectiveConfig struct {
 	Repo         RepoConfig             `toml:"repo" json:"repo"`
 	Bootstrap    BootstrapConfig        `toml:"bootstrap" json:"bootstrap"`
 	Env          EnvConfig              `toml:"env" json:"env"`
@@ -79,17 +111,34 @@ type WorkflowConfig struct {
 	Requirements RequirementsConfig     `toml:"requirements" json:"requirements"`
 }
 
+type ConfigFileInfo struct {
+	Path   string
+	Exists bool
+}
+
+type ConfigOverview struct {
+	Global   ConfigFileInfo
+	Repo     *ConfigFileInfo
+	Manifest *ConfigFileInfo
+}
+
 type RuntimeConfig struct {
-	RepoRoot            string
-	RepoID              string
-	ManifestPath        string
-	ManifestExists      bool
-	ManifestFingerprint string
-	GlobalConfigPath    string
-	StateRoot           string
-	Trusted             bool
-	Config              WorkflowConfig
-	ManifestConfig      WorkflowConfig
+	RepoRoot              string
+	RepoID                string
+	RepoConfigPath        string
+	RepoConfigExists      bool
+	RepoConfigFingerprint string
+	ManifestPath          string
+	ManifestExists        bool
+	ManifestFingerprint   string
+	GlobalConfigPath      string
+	GlobalConfigExists    bool
+	StateRoot             string
+	Trusted               bool
+	GlobalConfig          GlobalConfig
+	RepoConfig            RepoConfigFile
+	Manifest              ManifestFile
+	EffectiveConfig       EffectiveConfig
 }
 
 type TaskRef struct {
@@ -115,9 +164,6 @@ type TaskState struct {
 	CodexSessionID      string             `json:"codex_session_id,omitempty"`
 	PortBindings        []PortBindingState `json:"port_bindings,omitempty"`
 	ManagedEnvFiles     []string           `json:"managed_env_files,omitempty"`
-	AllocatedPort       int                `json:"allocated_port,omitempty"`
-	PortKey             string             `json:"port_key,omitempty"`
-	ManagedEnvFile      string             `json:"managed_env_file"`
 	ManifestFingerprint string             `json:"manifest_fingerprint,omitempty"`
 	CreatedAt           time.Time          `json:"created_at"`
 	UpdatedAt           time.Time          `json:"updated_at"`
@@ -170,30 +216,9 @@ const (
 )
 
 func (s TaskState) EffectiveManagedEnvFiles() []string {
-	if len(s.ManagedEnvFiles) > 0 {
-		return append([]string(nil), uniqueStrings(s.ManagedEnvFiles)...)
-	}
-	if s.ManagedEnvFile != "" {
-		return []string{s.ManagedEnvFile}
-	}
-	return nil
+	return append([]string(nil), uniqueStrings(s.ManagedEnvFiles)...)
 }
 
 func (s TaskState) EffectivePortBindings() []PortBindingState {
-	if len(s.PortBindings) > 0 {
-		return append([]PortBindingState(nil), s.PortBindings...)
-	}
-	if s.AllocatedPort == 0 {
-		return nil
-	}
-	target := s.ManagedEnvFile
-	key := s.PortKey
-	if key == "" {
-		key = "AGENTFLOW_PORT"
-	}
-	return []PortBindingState{{
-		Target: target,
-		Key:    key,
-		Port:   s.AllocatedPort,
-	}}
+	return append([]PortBindingState(nil), s.PortBindings...)
 }

@@ -1,0 +1,10 @@
+[env]
+targets = [{ path = ".env.agentflow" }]
+
+[commands]
+review = "go test ./..."
+verify_quick = "go test ./..."
+verify_cli = "go test ./..."
+
+[requirements]
+binaries = ["git", "tmux", "codex", "nvim", "go"]

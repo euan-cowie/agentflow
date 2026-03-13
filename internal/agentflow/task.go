@@ -19,7 +19,7 @@ func resolveManualTask(repoRoot, input string) (TaskRef, string, error) {
 	return ref, taskID(repoRoot, ref.Source, ref.Key), nil
 }
 
-func branchName(cfg WorkflowConfig, ref TaskRef, taskID string) string {
+func branchName(cfg EffectiveConfig, ref TaskRef, taskID string) string {
 	prefix := cfg.Repo.BranchPrefix
 	if prefix != "" && prefix[len(prefix)-1] != '/' {
 		prefix += "/"
@@ -27,7 +27,7 @@ func branchName(cfg WorkflowConfig, ref TaskRef, taskID string) string {
 	return prefix + ref.Slug + "-" + taskID[:6]
 }
 
-func renderSessionName(cfg WorkflowConfig, ref TaskRef, taskID string) string {
+func renderSessionName(cfg EffectiveConfig, ref TaskRef, taskID string) string {
 	value := cfg.Tmux.SessionName
 	replacer := strings.NewReplacer(
 		"{{repo}}", slugify(cfg.Repo.Name),

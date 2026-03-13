@@ -54,7 +54,7 @@ func TestTrustStoreCachesByFingerprint(t *testing.T) {
 	var output bytes.Buffer
 	input := bytes.NewBufferString("yes\n")
 
-	ok, err := store.EnsureTrusted("repo-1234", "/tmp/repo", "/tmp/repo/.agents/workflow.toml", "fingerprint-a", []string{"bun install"}, input, &output)
+	ok, err := store.EnsureTrusted("repo-1234", "/tmp/repo", "/tmp/repo/.agentflow/manifest.toml", "fingerprint-a", []string{"bun install"}, input, &output)
 	if err != nil {
 		t.Fatalf("EnsureTrusted returned error: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestTrustStoreCachesByFingerprint(t *testing.T) {
 func TestResolveCommandFallsBackToSavedSurfaceThenQuick(t *testing.T) {
 	t.Parallel()
 
-	cfg := defaultWorkflowConfig()
+	cfg := defaultEffectiveConfig()
 	cfg.Commands["verify_web"] = "bun run verify:web"
 	cfg.Commands["verify_quick"] = "bun run verify:quick"
 
@@ -121,34 +121,20 @@ func TestStateStoreNewRunLogPathCreatesDirectory(t *testing.T) {
 	}
 }
 
-func TestTaskStateEffectiveManagedEnvFilesAndBindingsSupportLegacyAndCurrentShapes(t *testing.T) {
+func TestTaskStateEffectiveManagedEnvFilesAndBindings(t *testing.T) {
 	t.Parallel()
 
-	current := TaskState{
+	state := TaskState{
 		ManagedEnvFiles: []string{"apps/web/.env.agentflow", "packages/api/.env.agentflow"},
 		PortBindings: []PortBindingState{
 			{Target: "apps/web/.env.agentflow", Key: "VITE_PORT", Port: 4101},
 			{Target: "packages/api/.env.agentflow", Key: "PORT", Port: 5101},
 		},
 	}
-	if len(current.EffectiveManagedEnvFiles()) != 2 {
-		t.Fatalf("expected current state to expose both managed env files, got %v", current.EffectiveManagedEnvFiles())
+	if len(state.EffectiveManagedEnvFiles()) != 2 {
+		t.Fatalf("expected state to expose both managed env files, got %v", state.EffectiveManagedEnvFiles())
 	}
-	if len(current.EffectivePortBindings()) != 2 {
-		t.Fatalf("expected current state to expose both bindings, got %v", current.EffectivePortBindings())
-	}
-
-	legacy := TaskState{
-		ManagedEnvFile: ".env.agentflow",
-		AllocatedPort:  4101,
-		PortKey:        "VITE_PORT",
-	}
-	files := legacy.EffectiveManagedEnvFiles()
-	if len(files) != 1 || files[0] != ".env.agentflow" {
-		t.Fatalf("unexpected legacy managed env files: %v", files)
-	}
-	bindings := legacy.EffectivePortBindings()
-	if len(bindings) != 1 || bindings[0].Key != "VITE_PORT" || bindings[0].Port != 4101 {
-		t.Fatalf("unexpected legacy bindings: %+v", bindings)
+	if len(state.EffectivePortBindings()) != 2 {
+		t.Fatalf("expected state to expose both bindings, got %v", state.EffectivePortBindings())
 	}
 }

@@ -1,6 +1,7 @@
 package agentflow
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -73,6 +74,28 @@ func writeManagedEnvFiles(worktree string, targetPaths []string, valuesByTarget 
 	return written, nil
 }
 
+func removeManagedEnvFiles(worktree string, targetPaths []string) error {
+	root := filepath.Clean(worktree)
+	for _, target := range uniqueStrings(targetPaths) {
+		target = strings.TrimSpace(target)
+		if target == "" {
+			continue
+		}
+		path := filepath.Clean(filepath.Join(root, target))
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return fmt.Errorf("resolve managed env target %q: %w", target, err)
+		}
+		if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			return fmt.Errorf("managed env target %q escapes worktree", target)
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove managed env target %q: %w", target, err)
+		}
+	}
+	return nil
+}
+
 func portBindingValues(bindings []PortBindingState) map[string]map[string]string {
 	values := make(map[string]map[string]string)
 	for _, binding := range bindings {
@@ -84,7 +107,7 @@ func portBindingValues(bindings []PortBindingState) map[string]map[string]string
 	return values
 }
 
-func buildTaskEnvState(cfg WorkflowConfig) ([]string, []PortBindingState, error) {
+func buildTaskEnvState(cfg EffectiveConfig) ([]string, []PortBindingState, error) {
 	targets, err := effectiveManagedEnvFiles(cfg)
 	if err != nil {
 		return nil, nil, err
