@@ -22,7 +22,7 @@ func TestLoadConfigRejectsUnknownFields(t *testing.T) {
 	}
 }
 
-func TestResolveRuntimeConfigMergesRepoConfigWithBuiltins(t *testing.T) {
+func TestResolveRuntimeConfigAppliesOnlyToolDefaults(t *testing.T) {
 	t.Setenv("AGENTFLOW_STATE_HOME", filepath.Join(t.TempDir(), "state-home"))
 
 	repoRoot := filepath.Join(t.TempDir(), "repo")
@@ -69,13 +69,19 @@ binaries = ["go"]
 		t.Fatalf("expected default surface override, got %q", runtime.EffectiveConfig.Repo.DefaultSurface)
 	}
 	if runtime.EffectiveConfig.Repo.WorktreeRoot != defaultWorktreeRootTemplate {
-		t.Fatalf("expected built-in worktree root, got %q", runtime.EffectiveConfig.Repo.WorktreeRoot)
+		t.Fatalf("expected tool-default worktree root, got %q", runtime.EffectiveConfig.Repo.WorktreeRoot)
 	}
 	if runtime.EffectiveConfig.Commands["verify_quick"] != "go test ./..." {
 		t.Fatalf("expected config command, got %q", runtime.EffectiveConfig.Commands["verify_quick"])
 	}
-	if !contains(runtime.EffectiveConfig.Requirements.Binaries, "git") || !contains(runtime.EffectiveConfig.Requirements.Binaries, "go") {
-		t.Fatalf("expected merged requirements, got %v", runtime.EffectiveConfig.Requirements.Binaries)
+	if len(runtime.EffectiveConfig.Agents) != 0 {
+		t.Fatalf("expected no implicit agents, got %+v", runtime.EffectiveConfig.Agents)
+	}
+	if len(runtime.EffectiveConfig.Tmux.Windows) != 0 {
+		t.Fatalf("expected no implicit tmux windows, got %+v", runtime.EffectiveConfig.Tmux.Windows)
+	}
+	if len(runtime.EffectiveConfig.Requirements.Binaries) != 1 || runtime.EffectiveConfig.Requirements.Binaries[0] != "go" {
+		t.Fatalf("expected repo requirements only, got %v", runtime.EffectiveConfig.Requirements.Binaries)
 	}
 }
 
@@ -179,14 +185,13 @@ func TestWorkflowTrustEntriesIncludeSideEffectfulWorkflow(t *testing.T) {
 
 	entries := workflowTrustEntries(cfg)
 	expected := []string{
-		"bootstrap command: bun install",
-		"bootstrap env file: .env.example -> .env.local",
-		"managed env target: .env.agentflow",
-		"port binding: PORT -> .env.agentflow [4101-4199]",
-		"command verify_quick: go test ./...",
-		"agent default: codex --no-alt-screen",
-		"tmux session: {{repo}}-{{task}}",
-		"tmux window editor: nvim .",
+		"run bootstrap command: bun install",
+		"copy bootstrap env file: .env.example -> .env.local",
+		"write managed env file: .env.agentflow",
+		"write preferred port binding: PORT -> .env.agentflow [4101-4199]",
+		"run command verify_quick: go test ./...",
+		"run agent default: codex --no-alt-screen",
+		"run tmux window editor: nvim .",
 	}
 	for _, want := range expected {
 		if !contains(entries, want) {
@@ -254,6 +259,36 @@ func TestValidateEffectiveConfigRejectsUndeclaredBindingTarget(t *testing.T) {
 	err := validateEffectiveConfig(cfg)
 	if err == nil {
 		t.Fatal("expected undeclared binding target to fail validation")
+	}
+}
+
+func TestValidateEffectiveConfigAllowsNoManagedEnvTargets(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultEffectiveConfig()
+	cfg.Repo.BaseBranch = "main"
+	cfg.Tmux.Windows = []TmuxWindowConfig{{Name: "editor", Command: "nvim ."}}
+
+	if err := validateEffectiveConfig(cfg); err != nil {
+		t.Fatalf("expected config without managed env targets to validate, got %v", err)
+	}
+}
+
+func TestValidateEffectiveConfigRejectsAgentWithoutCommand(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultEffectiveConfig()
+	cfg.Agents = map[string]AgentConfig{
+		"default": {},
+	}
+	cfg.Tmux.Windows = []TmuxWindowConfig{{Name: "codex", Agent: "default"}}
+
+	err := validateEffectiveConfig(cfg)
+	if err == nil {
+		t.Fatal("expected agent without command to fail validation")
+	}
+	if !strings.Contains(err.Error(), "must declare command") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -344,6 +379,9 @@ func TestSampleConfigParses(t *testing.T) {
 	}
 	if !exists || cfg.Repo.Name == "" || len(cfg.Env.Targets) != 1 {
 		t.Fatalf("unexpected sample config: %+v", cfg)
+	}
+	if len(cfg.Tmux.Windows) == 0 || len(cfg.Agents) == 0 {
+		t.Fatalf("expected sample config to declare explicit workflow, got %+v", cfg)
 	}
 }
 

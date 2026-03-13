@@ -121,6 +121,9 @@ func (a *App) Up(ctx context.Context, opts UpOptions) (TaskSummary, error) {
 	if err != nil {
 		return TaskSummary{}, err
 	}
+	if err := requireUpWorkflow(runtime); err != nil {
+		return TaskSummary{}, err
+	}
 	unlock, err := a.lockRepo(runtime)
 	if err != nil {
 		return TaskSummary{}, err
@@ -133,7 +136,18 @@ func (a *App) Up(ctx context.Context, opts UpOptions) (TaskSummary, error) {
 	}
 
 	if existing, err := a.state.Load(runtime.RepoID, taskID); err == nil {
-		return a.reconcileExisting(ctx, runtime, existing)
+		existing, discardable, err := a.recoverCreatingState(ctx, runtime, existing)
+		if err != nil {
+			return TaskSummary{}, err
+		}
+		if discardable {
+			fmt.Fprintf(a.stderr, "Discarding stale task state for %q after an interrupted create\n", existing.TaskRef.Title)
+			if err := a.state.Delete(existing.RepoID, existing.TaskID); err != nil {
+				return TaskSummary{}, err
+			}
+		} else {
+			return a.reconcileExisting(ctx, runtime, existing)
+		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return TaskSummary{}, err
 	}
@@ -160,13 +174,9 @@ func (a *App) Up(ctx context.Context, opts UpOptions) (TaskSummary, error) {
 		state.PrimaryAgentWindow = agentWindow.Name
 	}
 
-	if err := a.state.Save(state); err != nil {
-		return TaskSummary{}, err
-	}
-
 	entries := workflowTrustEntries(runtime.Config)
 	if _, err := a.trust.EnsureTrusted(runtime.RepoID, runtime.RepoRoot, runtime.ConfigPath, runtime.WorkflowFingerprint, entries, a.stdin, a.stdout); err != nil {
-		return a.failState(state, err)
+		return TaskSummary{}, err
 	}
 
 	worktreeRoot, err := resolveWorktreeRoot(runtime)
@@ -190,6 +200,9 @@ func (a *App) Up(ctx context.Context, opts UpOptions) (TaskSummary, error) {
 	}
 	state.ManagedEnvFiles = managedEnvFiles
 	state.PortBindings = portBindings
+	if err := a.state.Save(state); err != nil {
+		return TaskSummary{}, err
+	}
 
 	if err := a.git.CreateWorktree(ctx, runtime.RepoRoot, state.Branch, state.WorktreePath, state.BaseBranch); err != nil {
 		return a.failState(state, err)
@@ -415,8 +428,26 @@ func (a *App) Down(ctx context.Context, opts DownOptions) (TaskSummary, error) {
 	if err != nil {
 		return TaskSummary{}, err
 	}
+	state, discardable, err := a.recoverCreatingState(ctx, runtime, state)
+	if err != nil {
+		return TaskSummary{}, err
+	}
 	if state.Status == StatusCreating {
-		return TaskSummary{}, fmt.Errorf("task is currently %s", state.Status)
+		if discardable {
+			if err := a.state.Delete(state.RepoID, state.TaskID); err != nil {
+				return TaskSummary{}, err
+			}
+			return TaskSummary{
+				TaskID:   state.TaskID,
+				RepoRoot: state.RepoRoot,
+				Worktree: state.WorktreePath,
+				Branch:   state.Branch,
+				Session:  state.TmuxSession,
+				Surface:  state.Surface,
+				Status:   "deleted",
+			}, nil
+		}
+		fmt.Fprintf(a.stderr, "Resuming teardown for task %q after an interrupted create\n", state.TaskRef.Title)
 	}
 	if state.Status == StatusDeleting {
 		fmt.Fprintf(a.stderr, "Resuming teardown for task %q after a previous failed delete\n", state.TaskRef.Title)
@@ -561,13 +592,31 @@ func (a *App) Repair(ctx context.Context, opts CommonOptions, task string) (Task
 
 func (a *App) Doctor(ctx context.Context, opts DoctorOptions) ([]DoctorCheck, error) {
 	checks := make([]DoctorCheck, 0)
-	defaults := defaultEffectiveConfig()
-	required := defaults.Requirements.Binaries
+	required := []string{"git", "tmux", "codex"}
+	repoRoot, repoErr := a.resolveRepoRoot(ctx, opts.RepoPath)
 	var runtime RuntimeConfig
-	var err error
-	runtime, err = a.loadRuntime(ctx, opts.RepoPath)
-	if err == nil {
-		required = uniqueStrings(append(required, runtime.EffectiveConfig.Requirements.Binaries...))
+	var runtimeLoaded bool
+	if repoErr == nil {
+		configPath := ResolvedConfigPath(repoRoot)
+		exists := fileExists(configPath)
+		checks = append(checks, DoctorCheck{
+			Name:    "config",
+			OK:      exists,
+			Details: configPath,
+		})
+		if exists {
+			runtime, repoErr = resolveRuntimeConfig(repoRoot)
+			if repoErr != nil {
+				checks = append(checks, DoctorCheck{
+					Name:    "config-valid",
+					OK:      false,
+					Details: repoErr.Error(),
+				})
+			} else {
+				runtimeLoaded = true
+				required = uniqueStrings(append(required, runtime.Config.Requirements.Binaries...))
+			}
+		}
 	}
 
 	for _, binary := range uniqueStrings(required) {
@@ -579,21 +628,15 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) ([]DoctorCheck, er
 		})
 	}
 
-	_, err = a.exec.Run(ctx, "", nil, "codex", "login", "status")
+	_, err := a.exec.Run(ctx, "", nil, "codex", "login", "status")
 	checks = append(checks, DoctorCheck{
 		Name:    "codex-login",
 		OK:      err == nil,
 		Details: "codex login status",
 	})
 
-	if opts.RepoPath != "" {
-		checks = append(checks, DoctorCheck{
-			Name:    "config",
-			OK:      runtime.ConfigExists,
-			Details: runtime.ConfigPath,
-		})
-
-		for _, server := range runtime.EffectiveConfig.Requirements.MCPServers {
+	if runtimeLoaded {
+		for _, server := range runtime.Config.Requirements.MCPServers {
 			result, err := a.exec.Run(ctx, "", nil, "codex", "mcp", "list", "--json")
 			ok := err == nil && strings.Contains(result.Stdout, server)
 			checks = append(checks, DoctorCheck{
@@ -603,7 +646,7 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) ([]DoctorCheck, er
 			})
 		}
 
-		for name, command := range runtime.EffectiveConfig.Commands {
+		for name, command := range runtime.Config.Commands {
 			checks = append(checks, DoctorCheck{
 				Name:    "command:" + name,
 				OK:      headBinaryExists(ctx, a.exec, command),
@@ -666,6 +709,66 @@ func renderWorktreeRoot(runtime RuntimeConfig) string {
 	return replacer.Replace(root)
 }
 
+func plannedTaskWorktreePath(runtime RuntimeConfig, ref TaskRef, taskID string) string {
+	root := renderWorktreeRoot(runtime)
+	if !filepath.IsAbs(root) {
+		root = filepath.Join(runtime.RepoRoot, root)
+	}
+	return filepath.Clean(filepath.Join(root, ref.Slug+"-"+taskID[:6]))
+}
+
+func (a *App) recoverCreatingState(ctx context.Context, runtime RuntimeConfig, state TaskState) (TaskState, bool, error) {
+	if state.Status != StatusCreating {
+		return state, false, nil
+	}
+
+	expectedPath := strings.TrimSpace(state.WorktreePath)
+	if expectedPath == "" {
+		expectedPath = plannedTaskWorktreePath(runtime, state.TaskRef, state.TaskID)
+	}
+
+	match, err := a.git.FindWorktree(ctx, state.RepoRoot, state.Branch, expectedPath)
+	if err != nil {
+		return state, false, err
+	}
+	if match != nil {
+		resolvedPath := canonicalPath(match.Path)
+		if state.WorktreePath != resolvedPath {
+			state.WorktreePath = resolvedPath
+			state.UpdatedAt = a.now()
+			if err := a.state.Save(state); err != nil {
+				return state, false, err
+			}
+		}
+		return state, false, nil
+	}
+
+	branchExists := state.Branch != "" && a.git.RefExists(ctx, state.RepoRoot, "refs/heads/"+state.Branch)
+	pathExists := expectedPath != "" && fileExists(expectedPath)
+	if strings.TrimSpace(state.WorktreePath) == "" && expectedPath != "" && (branchExists || pathExists) {
+		state.WorktreePath = expectedPath
+		state.UpdatedAt = a.now()
+		if err := a.state.Save(state); err != nil {
+			return state, false, err
+		}
+	}
+
+	return state, !branchExists && !pathExists, nil
+}
+
+func requireUpWorkflow(runtime RuntimeConfig) error {
+	if !runtime.ConfigExists {
+		return fmt.Errorf("repo config missing at %s; run `agentflow config write` and define the repo workflow", runtime.ConfigPath)
+	}
+	if strings.TrimSpace(runtime.EffectiveConfig.Repo.BaseBranch) == "" {
+		return fmt.Errorf("repo.base_branch must be configured in %s", runtime.ConfigPath)
+	}
+	if len(runtime.EffectiveConfig.Tmux.Windows) == 0 {
+		return fmt.Errorf("tmux.windows must be configured in %s", runtime.ConfigPath)
+	}
+	return nil
+}
+
 func primaryAgentWindow(cfg EffectiveConfig) *TmuxWindowConfig {
 	for idx := range cfg.Tmux.Windows {
 		window := &cfg.Tmux.Windows[idx]
@@ -699,7 +802,10 @@ func (a *App) ensureTmux(ctx context.Context, runtime RuntimeConfig, state TaskS
 	sessionExists := a.tmux.HasSession(ctx, state.TmuxSession)
 	windows := runtime.EffectiveConfig.Tmux.Windows
 	if len(windows) == 0 {
-		windows = defaultEffectiveConfig().Tmux.Windows
+		if sessionExists {
+			return nil
+		}
+		return fmt.Errorf("tmux.windows must be configured in %s", runtime.ConfigPath)
 	}
 	needCreate := !sessionExists
 	if sessionExists {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -60,6 +61,16 @@ func TestTrustStoreCachesByFingerprint(t *testing.T) {
 	}
 	if !ok {
 		t.Fatal("expected repo to become trusted")
+	}
+	text := output.String()
+	if !strings.Contains(text, "Trust repo workflow for /tmp/repo?") {
+		t.Fatalf("expected workflow trust heading, got %q", text)
+	}
+	if !strings.Contains(text, "Repo-defined side effects:") {
+		t.Fatalf("expected side-effects heading, got %q", text)
+	}
+	if !strings.Contains(text, "Type 'yes' to trust this repo workflow: ") {
+		t.Fatalf("expected workflow trust prompt, got %q", text)
 	}
 
 	trusted, err := store.IsTrusted("repo-1234", "/tmp/repo", "fingerprint-a")

@@ -48,7 +48,8 @@ agentflow config show
 agentflow config effective
 ```
 
-Repo config is optional. If `.agentflow/config.toml` is missing, agentflow falls back to built-ins.
+Repo config is authoritative for workflow behavior. If `.agentflow/config.toml` is missing, `agentflow up` will refuse to invent tmux, agent, env, bootstrap, or command behavior.
+The only remaining built-in defaults are tool-owned mechanics such as the default worktree root template and tmux session naming template.
 
 For a section-by-section config reference, see [docs/config.md](/Users/euan-cowie/Projects/agentflow/docs/config.md).
 
@@ -99,8 +100,8 @@ verify_web = "bun run verify:web"
 [agents.default]
 runner = "codex"
 command = "codex --no-alt-screen -s workspace-write -a on-request"
-prime_prompt = "Read AGENTS.md and any relevant repo instructions before acting."
-resume_prompt = "Resume the task and re-check local instructions if the repo changed."
+prime_prompt = "Read AGENTS.md and any relevant repo instructions, then wait for my next instruction."
+resume_prompt = "Resume the task, re-check local instructions if the repo changed, then wait for my next instruction."
 
 [tmux]
 session_name = "{{repo}}-{{task}}-{{id}}"
@@ -122,12 +123,22 @@ binaries = ["git", "tmux", "codex", "nvim", "bun"]
 mcp_servers = ["linear"]
 ```
 
+Important behavior note:
+
+- `prime_prompt` is sent to Codex when `agentflow up` creates the agent window
+- `resume_prompt` is sent if agentflow later recreates or resumes that window
+- agentflow appends task context before launch, so a non-empty prompt will usually cause Codex to start working immediately
+- `agentflow attach` only reconnects to the tmux session that `up` already started
+
 ## Notes
 
 - Repo-defined workflow is trust-gated by the workflow fingerprint of `.agentflow/config.toml`.
+- The trust prompt is workflow-based, not command-only. It lists repo-defined side effects such as file writes and commands that agentflow will execute.
+- Trust is requested before `agentflow up` creates task state, worktrees, or tmux sessions. Declining trust should leave no task behind.
 - Changes to `repo.*` and `requirements.*` do not invalidate trust or count as config drift.
 - Existing task identity is anchored to saved state. Config drift is additive for tmux windows and current-only for verify/review commands.
 - Ports are treated as agentflow-managed preferred ports, not hard socket reservations.
 - `worktree_root` supports `{{agentflow_state_home}}`, `{{repo_id}}`, and `{{repo}}`.
 - `env.targets` declares the agentflow-managed env files for the task, and `ports.bindings` attaches generated ports to those targets.
+- Runtime workflow does not fall back to implicit tmux windows or agent commands; declare them explicitly in `.agentflow/config.toml`.
 - Repo-local Codex guidance for CLI/docs sync lives in [AGENTS.md](/Users/euan-cowie/Projects/agentflow/AGENTS.md) and [.agentflow/skills/cli-doc-sync/SKILL.md](/Users/euan-cowie/Projects/agentflow/.agentflow/skills/cli-doc-sync/SKILL.md).

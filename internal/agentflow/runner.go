@@ -12,7 +12,7 @@ type AgentRunner struct{}
 func (r AgentRunner) commandString(agent AgentConfig, worktree string, prompt string, resume bool) (string, error) {
 	command := strings.TrimSpace(agent.Command)
 	if command == "" {
-		command = defaultEffectiveConfig().Agents["default"].Command
+		return "", fmt.Errorf("agent command must not be empty")
 	}
 	parts := strings.Fields(command)
 	if len(parts) == 0 {

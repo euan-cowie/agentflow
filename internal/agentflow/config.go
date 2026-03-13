@@ -19,34 +19,15 @@ const defaultWorktreeRootTemplate = "{{agentflow_state_home}}/worktrees/{{repo_i
 func defaultEffectiveConfig() EffectiveConfig {
 	return EffectiveConfig{
 		Repo: RepoConfig{
-			BaseBranch:     "origin/main",
-			WorktreeRoot:   defaultWorktreeRootTemplate,
-			DefaultSurface: "default",
-		},
-		Env: EnvConfig{
-			Targets: []EnvTargetConfig{{Path: ".env.agentflow"}},
+			WorktreeRoot: defaultWorktreeRootTemplate,
 		},
 		Ports:    PortsConfig{},
 		Commands: map[string]string{},
-		Agents: map[string]AgentConfig{
-			"default": {
-				Runner:       "codex",
-				Command:      "codex --no-alt-screen -s workspace-write -a on-request",
-				PrimePrompt:  "Read AGENTS.md and any relevant repo instructions before acting.",
-				ResumePrompt: "Resume the current task and re-check AGENTS.md if the repo changed.",
-			},
-		},
+		Agents:   map[string]AgentConfig{},
 		Tmux: TmuxConfig{
 			SessionName: "{{repo}}-{{task}}-{{id}}",
-			Windows: []TmuxWindowConfig{
-				{Name: "editor", Command: "nvim ."},
-				{Name: "verify", Command: "clear"},
-				{Name: "codex", Agent: "default"},
-			},
 		},
-		Requirements: RequirementsConfig{
-			Binaries: []string{"git", "tmux", "codex", "nvim"},
-		},
+		Requirements: RequirementsConfig{},
 	}
 }
 
@@ -200,15 +181,9 @@ func resolveRuntimeConfig(repoRoot string) (RuntimeConfig, error) {
 }
 
 func validateEffectiveConfig(cfg EffectiveConfig) error {
-	if cfg.Repo.BaseBranch == "" {
-		return errors.New("repo.base_branch must not be empty")
-	}
 	managedFiles, err := effectiveManagedEnvFiles(cfg)
 	if err != nil {
 		return err
-	}
-	if len(managedFiles) == 0 {
-		return errors.New("env.targets must not be empty")
 	}
 	portBindings, err := effectivePortBindings(cfg)
 	if err != nil {
@@ -239,9 +214,6 @@ func validateEffectiveConfig(cfg EffectiveConfig) error {
 			return fmt.Errorf("port binding %q must describe a valid range", binding.Key)
 		}
 	}
-	if len(cfg.Tmux.Windows) == 0 {
-		return errors.New("tmux.windows must not be empty")
-	}
 	primaryAgents := 0
 	for _, window := range cfg.Tmux.Windows {
 		if window.Name == "" {
@@ -260,6 +232,14 @@ func validateEffectiveConfig(cfg EffectiveConfig) error {
 			}
 		}
 	}
+	for name, agent := range cfg.Agents {
+		if strings.TrimSpace(agent.Command) == "" {
+			return fmt.Errorf("agent %q must declare command", name)
+		}
+		if agent.Runner != "" && agent.Runner != "codex" {
+			return fmt.Errorf("agent %q declares unsupported runner %q", name, agent.Runner)
+		}
+	}
 	if primaryAgents > 1 {
 		return errors.New("v1 supports at most one tmux agent window")
 	}
@@ -267,6 +247,9 @@ func validateEffectiveConfig(cfg EffectiveConfig) error {
 }
 
 func effectiveManagedEnvFiles(cfg EffectiveConfig) ([]string, error) {
+	if len(cfg.Env.Targets) == 0 {
+		return nil, nil
+	}
 	paths := make([]string, 0, len(cfg.Env.Targets))
 	for _, target := range cfg.Env.Targets {
 		path := strings.TrimSpace(target.Path)
@@ -274,9 +257,6 @@ func effectiveManagedEnvFiles(cfg EffectiveConfig) ([]string, error) {
 			return nil, errors.New("env target path must not be empty")
 		}
 		paths = append(paths, path)
-	}
-	if len(paths) == 0 {
-		return nil, errors.New("env.targets must not be empty")
 	}
 	return uniqueStrings(paths), nil
 }
@@ -328,43 +308,37 @@ func workflowTrustEntries(cfg ConfigFile) []string {
 	entries := make([]string, 0)
 	for _, command := range cfg.Bootstrap.Commands {
 		if strings.TrimSpace(command) != "" {
-			entries = append(entries, "bootstrap command: "+command)
+			entries = append(entries, "run bootstrap command: "+command)
 		}
 	}
 	for _, mapping := range cfg.Bootstrap.EnvFiles {
 		if mapping.From != "" && mapping.To != "" {
-			entries = append(entries, fmt.Sprintf("bootstrap env file: %s -> %s", mapping.From, mapping.To))
+			entries = append(entries, fmt.Sprintf("copy bootstrap env file: %s -> %s", mapping.From, mapping.To))
 		}
 	}
 	for _, target := range cfg.Env.Targets {
 		if strings.TrimSpace(target.Path) != "" {
-			entries = append(entries, "managed env target: "+target.Path)
+			entries = append(entries, "write managed env file: "+target.Path)
 		}
 	}
 	for _, binding := range cfg.Ports.Bindings {
 		if binding.Target != "" && binding.Key != "" {
-			entries = append(entries, fmt.Sprintf("port binding: %s -> %s [%d-%d]", binding.Key, binding.Target, binding.Start, binding.End))
+			entries = append(entries, fmt.Sprintf("write preferred port binding: %s -> %s [%d-%d]", binding.Key, binding.Target, binding.Start, binding.End))
 		}
 	}
 	for name, command := range cfg.Commands {
 		if strings.TrimSpace(command) != "" {
-			entries = append(entries, fmt.Sprintf("command %s: %s", name, command))
+			entries = append(entries, fmt.Sprintf("run command %s: %s", name, command))
 		}
 	}
 	for name, agent := range cfg.Agents {
 		if strings.TrimSpace(agent.Command) != "" {
-			entries = append(entries, fmt.Sprintf("agent %s: %s", name, agent.Command))
+			entries = append(entries, fmt.Sprintf("run agent %s: %s", name, agent.Command))
 		}
 	}
-	if strings.TrimSpace(cfg.Tmux.SessionName) != "" {
-		entries = append(entries, "tmux session: "+cfg.Tmux.SessionName)
-	}
 	for _, window := range cfg.Tmux.Windows {
-		switch {
-		case strings.TrimSpace(window.Command) != "":
-			entries = append(entries, fmt.Sprintf("tmux window %s: %s", window.Name, window.Command))
-		case strings.TrimSpace(window.Agent) != "":
-			entries = append(entries, fmt.Sprintf("tmux window %s: agent %s", window.Name, window.Agent))
+		if strings.TrimSpace(window.Command) != "" {
+			entries = append(entries, fmt.Sprintf("run tmux window %s: %s", window.Name, window.Command))
 		}
 	}
 	return uniqueStrings(entries)
@@ -549,8 +523,8 @@ verify_quick = "make test"
 [agents.default]
 runner = "codex"
 command = "codex --no-alt-screen -s workspace-write -a on-request"
-prime_prompt = "Read AGENTS.md and any relevant repo instructions before acting."
-resume_prompt = "Resume the current task and re-check local instructions if the repo changed."
+prime_prompt = "Read AGENTS.md and any relevant repo instructions, then wait for my next instruction."
+resume_prompt = "Resume the current task, re-check local instructions if the repo changed, then wait for my next instruction."
 
 [tmux]
 session_name = "{{repo}}-{{task}}-{{id}}"

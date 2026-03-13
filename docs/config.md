@@ -7,7 +7,13 @@ This file serves two roles:
 - repo identity and defaults
 - runnable workflow definition for worktrees, tmux, env files, verification, and agents
 
-If the file is missing, agentflow falls back to built-in defaults.
+Repo config is authoritative for workflow behavior. If the file is missing, `agentflow up` will not invent tmux windows, agent commands, env targets, bootstrap commands, or verify/review commands for you.
+
+The only built-in defaults that remain are tool-owned mechanics:
+
+- default worktree root template: `{{agentflow_state_home}}/worktrees/{{repo_id}}`
+- default tmux session naming template: `{{repo}}-{{task}}-{{id}}`
+- repo name fallback: basename of the repo root when `repo.name` is omitted
 
 ## Sections
 
@@ -22,6 +28,8 @@ Fields:
 - `worktree_root`: where agentflow creates task worktrees
 - `branch_prefix`: prefix for generated task branches
 - `default_surface`: default surface used by `verify` command resolution
+
+`base_branch` should be treated as required for `agentflow up`, even though other commands can still inspect config without it.
 
 ### `[bootstrap]`
 
@@ -43,6 +51,8 @@ Fields:
 - `targets`: list of `{ path = "..." }`
 
 These files are owned by agentflow. It may create or rewrite them while preparing a task, and it removes them during teardown.
+
+This section is optional. If you do not need agentflow-managed env files, omit it entirely.
 
 ### `[ports]`
 
@@ -83,6 +93,17 @@ Common fields:
 
 Today `runner` is effectively Codex-only.
 
+Agent profiles are explicit now. If a tmux window references an agent, that agent must declare its command in repo config.
+
+`prime_prompt` and `resume_prompt` are active startup messages, not passive metadata:
+
+- `prime_prompt` is sent to Codex when agentflow creates the agent window for a new task
+- `resume_prompt` is sent when agentflow recreates or resumes that agent window later
+
+Agentflow also appends task context (`Task`, `Task ID`, and `Worktree`) to those prompts before launching Codex.
+
+This means a repo that declares an agent-backed tmux window will start Codex during `agentflow up`. If the prompt tells Codex to read files or inspect the repo, Codex will start doing that immediately. If you want a quieter startup, keep the prompt minimal and explicitly tell Codex to wait for the next instruction.
+
 ### `[tmux]`
 
 Session naming and window layout.
@@ -95,6 +116,10 @@ Fields:
   - `command` or `agent`
 
 V1 supports at most one agent-backed window.
+
+For `agentflow up`, `tmux.windows` should be treated as required. Agentflow no longer injects default `editor`, `verify`, or `codex` windows behind your back.
+
+If one of those windows is agent-backed, `agentflow up` will launch it as part of tmux session creation. `agentflow attach` only reconnects to the already-running session; it does not create a second startup prompt on its own.
 
 ### `[requirements]`
 
@@ -123,6 +148,15 @@ Changes to those sections:
 - invalidate repo trust
 - show up as config drift on existing tasks
 
+The trust prompt is intentionally narrower than “all workflow config”. It should describe only the repo-defined side effects that agentflow will carry out, such as:
+
+- commands it will run
+- tmux window commands it will launch
+- agent commands it will launch
+- managed env files or port bindings it will write
+
+For `agentflow up`, trust is requested before the tool creates the task record, worktree, or tmux session. Declining or interrupting the trust prompt should not leave a new task behind.
+
 Agentflow does **not** include these in the workflow fingerprint:
 
 - `repo`
@@ -138,7 +172,7 @@ Use:
 agentflow config effective
 ```
 
-This prints the merged runtime config after built-in defaults and repo config are applied. It is useful for checking what agentflow will actually use, especially when some sections are omitted from `.agentflow/config.toml`.
+This prints the merged runtime config after tool-owned defaults and repo config are applied. It is useful for checking naming/storage defaults and confirming that the workflow declared in `.agentflow/config.toml` is exactly what agentflow will use.
 
 ## Current Repo Example
 
@@ -157,6 +191,27 @@ targets = [{ path = ".env.agentflow" }]
 review = "go test ./..."
 verify_quick = "go test ./..."
 verify_cli = "go test ./..."
+
+[agents.default]
+runner = "codex"
+command = "codex --no-alt-screen -s workspace-write -a on-request"
+prime_prompt = "Read AGENTS.md and any relevant repo instructions, then wait for my next instruction."
+resume_prompt = "Resume the current task, re-check AGENTS.md if the repo changed, then wait for my next instruction."
+
+[tmux]
+session_name = "{{repo}}-{{task}}-{{id}}"
+
+[[tmux.windows]]
+name = "editor"
+command = "nvim ."
+
+[[tmux.windows]]
+name = "verify"
+command = "clear"
+
+[[tmux.windows]]
+name = "codex"
+agent = "default"
 
 [requirements]
 binaries = ["git", "tmux", "codex", "nvim", "go"]

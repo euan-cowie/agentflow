@@ -80,6 +80,30 @@ func (g GitOps) CreateWorktree(ctx context.Context, repoRoot, branch, path, base
 	return err
 }
 
+func (g GitOps) FindWorktree(ctx context.Context, repoRoot, branch, expectedPath string) (*WorktreeInfo, error) {
+	infos, err := g.WorktreeList(ctx, repoRoot)
+	if err != nil {
+		return nil, err
+	}
+	branchRef := ""
+	if strings.TrimSpace(branch) != "" {
+		branchRef = "refs/heads/" + branch
+	}
+	expectedCanonical := ""
+	if strings.TrimSpace(expectedPath) != "" {
+		expectedCanonical = canonicalPath(expectedPath)
+	}
+	for _, info := range infos {
+		branchMatch := branchRef != "" && info.BranchRef == branchRef
+		pathMatch := expectedCanonical != "" && canonicalPath(info.Path) == expectedCanonical
+		if branchMatch || pathMatch {
+			match := info
+			return &match, nil
+		}
+	}
+	return nil, nil
+}
+
 func (g GitOps) RefExists(ctx context.Context, repoRoot, ref string) bool {
 	if strings.TrimSpace(ref) == "" {
 		return false

@@ -215,7 +215,7 @@ func configCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
 				status = "exists"
 			}
 			fmt.Fprintf(os.Stdout, "Repo config: %s (%s)\n", overview.Repo.Path, status)
-			fmt.Fprintln(os.Stdout, "Effective config: derived from repo config + built-ins")
+			fmt.Fprintln(os.Stdout, "Effective config: derived from repo config + tool-owned defaults")
 			return nil
 		},
 	}

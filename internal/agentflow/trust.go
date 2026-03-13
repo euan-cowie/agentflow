@@ -62,13 +62,13 @@ func (t *TrustStore) EnsureTrusted(repoID, repoRoot, configPath, fingerprint str
 		return true, nil
 	}
 
-	if _, err := fmt.Fprintf(output, "Trust repo commands for %s?\n", repoRoot); err != nil {
+	if _, err := fmt.Fprintf(output, "Trust repo workflow for %s?\n", repoRoot); err != nil {
 		return false, err
 	}
 	if _, err := fmt.Fprintf(output, "Repo config: %s\n", configPath); err != nil {
 		return false, err
 	}
-	if _, err := io.WriteString(output, "Executable entries:\n"); err != nil {
+	if _, err := io.WriteString(output, "Repo-defined side effects:\n"); err != nil {
 		return false, err
 	}
 	for _, entry := range entries {
@@ -76,7 +76,7 @@ func (t *TrustStore) EnsureTrusted(repoID, repoRoot, configPath, fingerprint str
 			return false, err
 		}
 	}
-	if _, err := io.WriteString(output, "Type 'yes' to trust this repo config: "); err != nil {
+	if _, err := io.WriteString(output, "Type 'yes' to trust this repo workflow: "); err != nil {
 		return false, err
 	}
 	reader := bufio.NewReader(input)

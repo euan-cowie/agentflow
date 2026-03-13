@@ -11,5 +11,26 @@ review = "go test ./..."
 verify_quick = "go test ./..."
 verify_cli = "go test ./..."
 
+[agents.default]
+runner = "codex"
+command = "codex --no-alt-screen -s workspace-write -a on-request"
+prime_prompt = "Read AGENTS.md and any relevant repo instructions, then wait for my next instruction."
+resume_prompt = "Resume the current task, re-check AGENTS.md if the repo changed, then wait for my next instruction."
+
+[tmux]
+session_name = "{{repo}}-{{task}}-{{id}}"
+
+[[tmux.windows]]
+name = "editor"
+command = "nvim ."
+
+[[tmux.windows]]
+name = "verify"
+command = "clear"
+
+[[tmux.windows]]
+name = "codex"
+agent = "default"
+
 [requirements]
 binaries = ["git", "tmux", "codex", "nvim", "go"]
