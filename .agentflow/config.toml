@@ -6,6 +6,12 @@ default_surface = "cli"
 [env]
 targets = [{ path = ".env.agentflow" }]
 
+[delivery]
+remote = "origin"
+sync_strategy = "rebase"
+preflight = ["review", "verify"]
+cleanup = "async"
+
 [commands]
 review = "go test ./..."
 verify_quick = "go test ./..."

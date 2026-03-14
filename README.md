@@ -13,11 +13,16 @@
 
 - `agentflow up <task> [--surface ...] [--repo ...]`
 - `agentflow attach <task>`
+- `agentflow status [task]`
 - `agentflow codex <task>`
+- `agentflow sync <task> [--all] [--push]`
+- `agentflow submit <task> [--draft|--ready]`
+- `agentflow land <task> [--watch]`
 - `agentflow verify <task> [--surface ...] [--foreground]`
 - `agentflow review <task> [--foreground]`
 - `agentflow down <task> [--delete-branch]`
 - `agentflow list`
+- `agentflow gc [task]`
 - `agentflow doctor`
 - `agentflow repair <task>`
 - `agentflow config`
@@ -50,6 +55,7 @@ agentflow config effective
 
 Repo config is authoritative for workflow behavior. If `.agentflow/config.toml` is missing, `agentflow up` will refuse to invent tmux, agent, env, bootstrap, or command behavior.
 The only remaining built-in defaults are tool-owned mechanics such as the default worktree root template and tmux session naming template.
+Delivery commands also use repo-configured defaults from `[delivery]` when present.
 
 For a section-by-section config reference, see [docs/config.md](/Users/euan-cowie/Projects/agentflow/docs/config.md).
 
@@ -79,6 +85,12 @@ targets = [
   { path = "apps/web/.env.agentflow" },
   { path = "packages/api/.env.agentflow" },
 ]
+
+[delivery]
+remote = "origin"
+sync_strategy = "rebase"
+preflight = ["review", "verify"]
+cleanup = "async"
 
 [[ports.bindings]]
 target = "apps/web/.env.agentflow"
@@ -130,6 +142,19 @@ Important behavior note:
 - agentflow appends task context before launch, so a non-empty prompt will usually cause Codex to start working immediately
 - `agentflow attach` only reconnects to the tmux session that `up` already started
 
+## Async delivery flow
+
+The delivery layer sits on top of the existing task lifecycle:
+
+1. `agentflow up <task>` creates the worktree, tmux session, and agent window.
+2. `agentflow status [task]` shows local branch health plus PR/check state when GitHub integration is enabled.
+3. `agentflow sync <task>` fetches the configured remote and rebases or merges the task branch onto the configured base branch.
+4. `agentflow submit <task>` pushes the task branch and, when `[github].enabled = true`, creates or reuses a PR.
+5. `agentflow land <task>` runs preflight commands, syncs the branch, pushes it, and enables merge through `gh`.
+6. `agentflow gc [task]` removes merged task worktrees, tmux sessions, and local branches.
+
+GitHub automation is optional. If `[github].enabled` is omitted or false, `submit` still pushes the branch but `land` will refuse to continue.
+
 ## Notes
 
 - Repo-defined workflow is trust-gated by the workflow fingerprint of `.agentflow/config.toml`.
@@ -140,5 +165,7 @@ Important behavior note:
 - Ports are treated as agentflow-managed preferred ports, not hard socket reservations.
 - `worktree_root` supports `{{agentflow_state_home}}`, `{{repo_id}}`, and `{{repo}}`.
 - `env.targets` declares the agentflow-managed env files for the task, and `ports.bindings` attaches generated ports to those targets.
+- `[delivery]` configures branch sync, preflight, and async cleanup behavior.
+- `[github]` enables optional `gh` integration for PR creation, checks, and merge automation.
 - Runtime workflow does not fall back to implicit tmux windows or agent commands; declare them explicitly in `.agentflow/config.toml`.
 - Repo-local Codex guidance for CLI/docs sync lives in [AGENTS.md](/Users/euan-cowie/Projects/agentflow/AGENTS.md) and [.agentflow/skills/cli-doc-sync/SKILL.md](/Users/euan-cowie/Projects/agentflow/.agentflow/skills/cli-doc-sync/SKILL.md).

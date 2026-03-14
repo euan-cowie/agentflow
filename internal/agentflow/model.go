@@ -32,6 +32,23 @@ type PortsConfig struct {
 	Bindings []PortBindingConfig `toml:"bindings" json:"bindings"`
 }
 
+type DeliveryConfig struct {
+	Remote       string   `toml:"remote" json:"remote"`
+	SyncStrategy string   `toml:"sync_strategy" json:"sync_strategy"`
+	Preflight    []string `toml:"preflight" json:"preflight"`
+	Cleanup      string   `toml:"cleanup" json:"cleanup"`
+}
+
+type GitHubConfig struct {
+	Enabled            bool     `toml:"enabled" json:"enabled"`
+	DraftOnSubmit      bool     `toml:"draft_on_submit" json:"draft_on_submit"`
+	MergeMethod        string   `toml:"merge_method" json:"merge_method"`
+	AutoMerge          bool     `toml:"auto_merge" json:"auto_merge"`
+	DeleteRemoteBranch bool     `toml:"delete_remote_branch" json:"delete_remote_branch"`
+	Labels             []string `toml:"labels" json:"labels"`
+	Reviewers          []string `toml:"reviewers" json:"reviewers"`
+}
+
 type PortBindingConfig struct {
 	Target string `toml:"target" json:"target"`
 	Key    string `toml:"key" json:"key"`
@@ -67,6 +84,8 @@ type ConfigFile struct {
 	Bootstrap    BootstrapConfig        `toml:"bootstrap" json:"bootstrap"`
 	Env          EnvConfig              `toml:"env" json:"env"`
 	Ports        PortsConfig            `toml:"ports" json:"ports"`
+	Delivery     DeliveryConfig         `toml:"delivery" json:"delivery"`
+	GitHub       GitHubConfig           `toml:"github" json:"github"`
 	Commands     map[string]string      `toml:"commands" json:"commands"`
 	Agents       map[string]AgentConfig `toml:"agents" json:"agents"`
 	Tmux         TmuxConfig             `toml:"tmux" json:"tmux"`
@@ -120,8 +139,24 @@ type TaskState struct {
 	PortBindings        []PortBindingState `json:"port_bindings,omitempty"`
 	ManagedEnvFiles     []string           `json:"managed_env_files,omitempty"`
 	WorkflowFingerprint string             `json:"workflow_fingerprint,omitempty"`
+	Delivery            TaskDeliveryState  `json:"delivery,omitempty"`
 	CreatedAt           time.Time          `json:"created_at"`
 	UpdatedAt           time.Time          `json:"updated_at"`
+}
+
+type TaskDeliveryState struct {
+	State             string    `json:"state,omitempty"`
+	Remote            string    `json:"remote,omitempty"`
+	RemoteBranch      string    `json:"remote_branch,omitempty"`
+	BaseRef           string    `json:"base_ref,omitempty"`
+	LastBaseSHA       string    `json:"last_base_sha,omitempty"`
+	LastHeadSHA       string    `json:"last_head_sha,omitempty"`
+	PullRequestNumber int       `json:"pull_request_number,omitempty"`
+	PullRequestURL    string    `json:"pull_request_url,omitempty"`
+	PullRequestState  string    `json:"pull_request_state,omitempty"`
+	LastSyncedAt      time.Time `json:"last_synced_at,omitempty"`
+	LastSubmittedAt   time.Time `json:"last_submitted_at,omitempty"`
+	MergedAt          time.Time `json:"merged_at,omitempty"`
 }
 
 type PortBindingState struct {
@@ -132,6 +167,7 @@ type PortBindingState struct {
 
 type TaskSummary struct {
 	TaskID      string
+	TaskTitle   string
 	RepoRoot    string
 	Worktree    string
 	Branch      string
@@ -140,6 +176,31 @@ type TaskSummary struct {
 	Status      string
 	ConfigDrift bool
 	LogPath     string
+	Delivery    TaskDeliveryState
+	Dirty       bool
+	Ahead       int
+	Behind      int
+	ChecksState string
+	MergeState  string
+}
+
+type TaskStatus struct {
+	TaskID        string
+	TaskTitle     string
+	RepoRoot      string
+	Worktree      string
+	Branch        string
+	Session       string
+	Surface       string
+	Status        string
+	FailureReason string
+	ConfigDrift   bool
+	Delivery      TaskDeliveryState
+	Dirty         bool
+	Ahead         int
+	Behind        int
+	ChecksState   string
+	MergeState    string
 }
 
 type TrustRecord struct {
@@ -168,6 +229,16 @@ const (
 	StatusReady    = "ready"
 	StatusBroken   = "broken"
 	StatusDeleting = "deleting"
+)
+
+const (
+	DeliveryStateLocal     = "local"
+	DeliveryStateDraft     = "draft"
+	DeliveryStateSubmitted = "submitted"
+	DeliveryStateQueued    = "queued"
+	DeliveryStateMerged    = "merged"
+	DeliveryStateClosed    = "closed"
+	DeliveryStateBlocked   = "blocked"
 )
 
 func (s TaskState) EffectiveManagedEnvFiles() []string {

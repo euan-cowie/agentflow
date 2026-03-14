@@ -85,10 +85,31 @@ func initCommittedRepo(t *testing.T) string {
 	return repo
 }
 
+func initCommittedRepoWithRemote(t *testing.T) (string, string) {
+	t.Helper()
+
+	repo := initCommittedRepo(t)
+	remote := filepath.Join(t.TempDir(), "origin.git")
+	runGit(t, "", "init", "--bare", remote)
+	runGit(t, repo, "remote", "add", "origin", remote)
+	runGit(t, repo, "push", "-u", "origin", "main")
+	return repo, remote
+}
+
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	exec := Executor{}
 	if _, err := exec.Run(context.Background(), dir, nil, "git", args...); err != nil {
 		t.Fatalf("git %v failed: %v", args, err)
 	}
+}
+
+func runGitCapture(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	exec := Executor{}
+	result, err := exec.Run(context.Background(), dir, nil, "git", args...)
+	if err != nil {
+		t.Fatalf("git %v failed: %v", args, err)
+	}
+	return strings.TrimSpace(result.Stdout)
 }

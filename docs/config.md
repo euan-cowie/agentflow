@@ -5,7 +5,7 @@
 This file serves two roles:
 
 - repo identity and defaults
-- runnable workflow definition for worktrees, tmux, env files, verification, and agents
+- runnable workflow definition for worktrees, tmux, env files, verification, agents, and delivery
 
 Repo config is authoritative for workflow behavior. If the file is missing, `agentflow up` will not invent tmux windows, agent commands, env targets, bootstrap commands, or verify/review commands for you.
 
@@ -80,6 +80,11 @@ Common entries:
 
 `agentflow verify` resolves surface-specific commands first, then falls back to `verify_quick`.
 
+These commands are also used by the delivery layer:
+
+- `agentflow submit` may create a PR after pushing the branch
+- `agentflow land` runs the configured `delivery.preflight` entries in order
+
 ### `[agents]`
 
 Agent profiles used by tmux windows.
@@ -121,6 +126,56 @@ For `agentflow up`, `tmux.windows` should be treated as required. Agentflow no l
 
 If one of those windows is agent-backed, `agentflow up` will launch it as part of tmux session creation. `agentflow attach` only reconnects to the already-running session; it does not create a second startup prompt on its own.
 
+### `[delivery]`
+
+Branch landing and cleanup behavior.
+
+Fields:
+
+- `remote`
+- `sync_strategy`
+- `preflight`
+- `cleanup`
+
+Current supported values:
+
+- `sync_strategy`: `rebase` or `merge`
+- `cleanup`: `async` or `manual`
+
+Behavior:
+
+- `agentflow sync` fetches `delivery.remote` and updates the task branch against the task base branch using `delivery.sync_strategy`
+- `agentflow land` runs each `delivery.preflight` entry before it enables merge
+- `agentflow gc` is the async cleanup path when `delivery.cleanup = "async"`
+
+When `delivery.preflight` is omitted, agentflow currently defaults to `["review", "verify"]`.
+
+### `[github]`
+
+Optional GitHub CLI integration for PR-backed delivery.
+
+Fields:
+
+- `enabled`
+- `draft_on_submit`
+- `merge_method`
+- `auto_merge`
+- `delete_remote_branch`
+- `labels`
+- `reviewers`
+
+Behavior:
+
+- if `enabled = true`, `agentflow submit` creates or reuses a PR with `gh`
+- `agentflow status` includes PR/check/merge metadata
+- `agentflow land` uses `gh pr ready` and `gh pr merge`
+- `agentflow gc` deletes the remote branch only after local task cleanup succeeds when `delete_remote_branch = true`
+
+Current supported values:
+
+- `merge_method`: `auto`, `squash`, `merge`, or `rebase`
+- `merge_method = "auto"` currently resolves to GitHub's regular merge mode when agentflow must choose a concrete strategy
+
 ### `[requirements]`
 
 Repo requirements checked by `agentflow doctor`.
@@ -139,6 +194,8 @@ Agentflow computes a workflow fingerprint from these sections:
 - `bootstrap`
 - `env`
 - `ports`
+- `delivery`
+- `github`
 - `commands`
 - `agents`
 - `tmux`
@@ -154,6 +211,8 @@ The trust prompt is intentionally narrower than “all workflow config”. It sh
 - tmux window commands it will launch
 - agent commands it will launch
 - managed env files or port bindings it will write
+- branch sync and push behavior
+- GitHub PR operations when enabled
 
 For `agentflow up`, trust is requested before the tool creates the task record, worktree, or tmux session. Declining or interrupting the trust prompt should not leave a new task behind.
 
@@ -186,6 +245,12 @@ default_surface = "cli"
 
 [env]
 targets = [{ path = ".env.agentflow" }]
+
+[delivery]
+remote = "origin"
+sync_strategy = "rebase"
+preflight = ["review", "verify"]
+cleanup = "async"
 
 [commands]
 review = "go test ./..."

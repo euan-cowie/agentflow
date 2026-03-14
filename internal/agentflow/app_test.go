@@ -22,6 +22,12 @@ default_surface = "default"
 [env]
 targets = [{ path = ".env.agentflow" }]
 
+[delivery]
+remote = "origin"
+sync_strategy = "rebase"
+preflight = ["review", "verify"]
+cleanup = "async"
+
 [agents.default]
 runner = "codex"
 command = "codex --no-alt-screen -s workspace-write -a on-request"
@@ -525,6 +531,7 @@ func newTestApp(t *testing.T) (*App, *bytes.Buffer, *bytes.Buffer) {
 	return &App{
 		exec:   exec,
 		git:    NewGitOps(exec),
+		gh:     NewGitHubOps(exec),
 		tmux:   NewTmuxOps(exec),
 		runner: AgentRunner{},
 		state:  NewStateStore(stateRoot),

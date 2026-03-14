@@ -116,6 +116,23 @@ func TestResolveCommandFallsBackToSavedSurfaceThenQuick(t *testing.T) {
 	}
 }
 
+func TestResolveCommandUsesNamedCommandBeforeVerifyFallbacks(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultEffectiveConfig()
+	cfg.Commands["verify_web"] = "bun run verify:web"
+	cfg.Commands["lint"] = "bun run lint"
+
+	state := TaskState{Surface: "web"}
+	command, name, err := resolveCommand(cfg, state, "lint", "")
+	if err != nil {
+		t.Fatalf("resolveCommand returned error: %v", err)
+	}
+	if name != "lint" || command != "bun run lint" {
+		t.Fatalf("expected named command resolution, got %s %s", name, command)
+	}
+}
+
 func TestStateStoreNewRunLogPathCreatesDirectory(t *testing.T) {
 	t.Parallel()
 

@@ -47,6 +47,26 @@ func attachCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
 	}
 }
 
+func statusCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "status [task]",
+		Short: "Show local and delivery status for one task or all tasks",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			task := ""
+			if len(args) == 1 {
+				task = args[0]
+			}
+			statuses, err := app().Status(cmd.Context(), agentflow.CommonOptions{RepoPath: *repoPath}, task)
+			if err != nil {
+				return err
+			}
+			printStatuses(statuses)
+			return nil
+		},
+	}
+}
+
 func codexCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "codex <task>",
@@ -58,6 +78,116 @@ func codexCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
 				return err
 			}
 			printSummary(summary)
+			return nil
+		},
+	}
+}
+
+func syncCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
+	var all bool
+	var push bool
+	cmd := &cobra.Command{
+		Use:   "sync <task>",
+		Short: "Sync one or more task branches with the repo base branch",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if all {
+				if len(args) != 0 {
+					return fmt.Errorf("sync --all does not take a task argument")
+				}
+				return nil
+			}
+			return cobra.ExactArgs(1)(cmd, args)
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			task := ""
+			if len(args) == 1 {
+				task = args[0]
+			}
+			summaries, err := app().Sync(cmd.Context(), agentflow.SyncOptions{
+				CommonOptions: agentflow.CommonOptions{RepoPath: *repoPath},
+				Task:          task,
+				All:           all,
+				Push:          push,
+			})
+			if err != nil {
+				return err
+			}
+			printSummaries(summaries)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&all, "all", false, "Sync every tracked task in the repo")
+	cmd.Flags().BoolVar(&push, "push", false, "Push the branch after syncing")
+	return cmd
+}
+
+func submitCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
+	var draft bool
+	var ready bool
+	cmd := &cobra.Command{
+		Use:   "submit <task>",
+		Short: "Push a task branch and create or reuse a pull request",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			summary, err := app().Submit(cmd.Context(), agentflow.SubmitOptions{
+				CommonOptions: agentflow.CommonOptions{RepoPath: *repoPath},
+				Task:          args[0],
+				Draft:         draft,
+				Ready:         ready,
+			})
+			if err != nil {
+				return err
+			}
+			printSummary(summary)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&draft, "draft", false, "Create or keep the pull request as draft")
+	cmd.Flags().BoolVar(&ready, "ready", false, "Submit the pull request as ready for review")
+	return cmd
+}
+
+func landCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
+	var watch bool
+	cmd := &cobra.Command{
+		Use:   "land <task>",
+		Short: "Run preflight checks and enable merge for a task pull request",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			summary, err := app().Land(cmd.Context(), agentflow.LandOptions{
+				CommonOptions: agentflow.CommonOptions{RepoPath: *repoPath},
+				Task:          args[0],
+				Watch:         watch,
+			})
+			if err != nil {
+				return err
+			}
+			printSummary(summary)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&watch, "watch", false, "Wait until the pull request merges or closes")
+	return cmd
+}
+
+func gcCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "gc [task]",
+		Short: "Clean up merged task worktrees and sessions",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			task := ""
+			if len(args) == 1 {
+				task = args[0]
+			}
+			summaries, err := app().GC(cmd.Context(), agentflow.GCOptions{
+				CommonOptions: agentflow.CommonOptions{RepoPath: *repoPath},
+				Task:          task,
+			})
+			if err != nil {
+				return err
+			}
+			printSummaries(summaries)
 			return nil
 		},
 	}
@@ -301,11 +431,81 @@ func configEffectiveCommand(app func() *agentflow.App, repoPath *string) *cobra.
 }
 
 func printSummary(summary agentflow.TaskSummary) {
-	fmt.Fprintf(os.Stdout, "task_id=%s\nstatus=%s\nrepo=%s\nworktree=%s\nbranch=%s\nsession=%s\nsurface=%s\n", summary.TaskID, summary.Status, summary.RepoRoot, summary.Worktree, summary.Branch, summary.Session, summary.Surface)
+	fmt.Fprintf(os.Stdout, "task_id=%s\ntask=%s\nstatus=%s\nrepo=%s\nworktree=%s\nbranch=%s\nsession=%s\nsurface=%s\n", summary.TaskID, summary.TaskTitle, summary.Status, summary.RepoRoot, summary.Worktree, summary.Branch, summary.Session, summary.Surface)
 	if summary.ConfigDrift {
 		fmt.Fprintln(os.Stdout, "config_drift=true")
 	}
 	if summary.LogPath != "" {
 		fmt.Fprintf(os.Stdout, "log=%s\n", summary.LogPath)
+	}
+	if summary.Delivery.State != "" {
+		fmt.Fprintf(os.Stdout, "delivery_state=%s\n", summary.Delivery.State)
+	}
+	if summary.Delivery.PullRequestNumber != 0 {
+		fmt.Fprintf(os.Stdout, "pr=%d\n", summary.Delivery.PullRequestNumber)
+	}
+	if summary.Delivery.PullRequestURL != "" {
+		fmt.Fprintf(os.Stdout, "pr_url=%s\n", summary.Delivery.PullRequestURL)
+	}
+	if summary.Ahead != 0 || summary.Behind != 0 {
+		fmt.Fprintf(os.Stdout, "ahead=%d\nbehind=%d\n", summary.Ahead, summary.Behind)
+	}
+	if summary.ChecksState != "" {
+		fmt.Fprintf(os.Stdout, "checks=%s\n", summary.ChecksState)
+	}
+	if summary.MergeState != "" {
+		fmt.Fprintf(os.Stdout, "merge_state=%s\n", summary.MergeState)
+	}
+}
+
+func printSummaries(summaries []agentflow.TaskSummary) {
+	for _, summary := range summaries {
+		printSummary(summary)
+		fmt.Fprintln(os.Stdout)
+	}
+}
+
+func printStatuses(statuses []agentflow.TaskStatus) {
+	if len(statuses) == 1 {
+		status := statuses[0]
+		fmt.Fprintf(os.Stdout, "task_id=%s\ntask=%s\nstatus=%s\nrepo=%s\nworktree=%s\nbranch=%s\nsession=%s\nsurface=%s\n", status.TaskID, status.TaskTitle, status.Status, status.RepoRoot, status.Worktree, status.Branch, status.Session, status.Surface)
+		if status.ConfigDrift {
+			fmt.Fprintln(os.Stdout, "config_drift=true")
+		}
+		if status.FailureReason != "" {
+			fmt.Fprintf(os.Stdout, "failure=%s\n", status.FailureReason)
+		}
+		fmt.Fprintf(os.Stdout, "delivery_state=%s\n", status.Delivery.State)
+		fmt.Fprintf(os.Stdout, "dirty=%t\nahead=%d\nbehind=%d\n", status.Dirty, status.Ahead, status.Behind)
+		if status.Delivery.PullRequestNumber != 0 {
+			fmt.Fprintf(os.Stdout, "pr=%d\n", status.Delivery.PullRequestNumber)
+		}
+		if status.Delivery.PullRequestURL != "" {
+			fmt.Fprintf(os.Stdout, "pr_url=%s\n", status.Delivery.PullRequestURL)
+		}
+		if status.ChecksState != "" {
+			fmt.Fprintf(os.Stdout, "checks=%s\n", status.ChecksState)
+		}
+		if status.MergeState != "" {
+			fmt.Fprintf(os.Stdout, "merge_state=%s\n", status.MergeState)
+		}
+		return
+	}
+
+	for _, status := range statuses {
+		fmt.Fprintf(os.Stdout, "%s\t%s\t%s\t%s\tdirty=%t\tahead=%d\tbehind=%d", status.TaskTitle, status.Status, status.Delivery.State, status.Branch, status.Dirty, status.Ahead, status.Behind)
+		if status.Delivery.PullRequestNumber != 0 {
+			fmt.Fprintf(os.Stdout, "\tpr=%d", status.Delivery.PullRequestNumber)
+		}
+		if status.ChecksState != "" {
+			fmt.Fprintf(os.Stdout, "\tchecks=%s", status.ChecksState)
+		}
+		if status.MergeState != "" {
+			fmt.Fprintf(os.Stdout, "\tmerge=%s", status.MergeState)
+		}
+		if status.FailureReason != "" {
+			fmt.Fprintf(os.Stdout, "\tfailure=%s", status.FailureReason)
+		}
+		fmt.Fprintln(os.Stdout)
 	}
 }

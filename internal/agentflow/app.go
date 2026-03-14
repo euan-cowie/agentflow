@@ -14,6 +14,7 @@ import (
 type App struct {
 	exec   Executor
 	git    GitOps
+	gh     GitHubOps
 	tmux   TmuxOps
 	runner AgentRunner
 	state  *StateStore
@@ -47,6 +48,32 @@ type DownOptions struct {
 	DeleteBranch bool
 }
 
+type SyncOptions struct {
+	CommonOptions
+	Task       string
+	All        bool
+	Push       bool
+	Foreground bool
+}
+
+type SubmitOptions struct {
+	CommonOptions
+	Task  string
+	Draft bool
+	Ready bool
+}
+
+type LandOptions struct {
+	CommonOptions
+	Task  string
+	Watch bool
+}
+
+type GCOptions struct {
+	CommonOptions
+	Task string
+}
+
 type DoctorOptions struct {
 	CommonOptions
 }
@@ -60,6 +87,7 @@ func NewApp(stdin io.Reader, stdout, stderr io.Writer) (*App, error) {
 	return &App{
 		exec:   exec,
 		git:    NewGitOps(exec),
+		gh:     NewGitHubOps(exec),
 		tmux:   NewTmuxOps(exec),
 		runner: AgentRunner{},
 		state:  NewStateStore(stateRoot),
@@ -169,6 +197,12 @@ func (a *App) Up(ctx context.Context, opts UpOptions) (TaskSummary, error) {
 		WorkflowFingerprint: runtime.WorkflowFingerprint,
 		CreatedAt:           a.now(),
 		UpdatedAt:           a.now(),
+		Delivery: TaskDeliveryState{
+			State:        DeliveryStateLocal,
+			Remote:       strings.TrimSpace(runtime.EffectiveConfig.Delivery.Remote),
+			RemoteBranch: branchName(runtime.EffectiveConfig, ref, taskID),
+			BaseRef:      normalizeBaseBranch(runtime.EffectiveConfig.Repo.BaseBranch, strings.TrimSpace(runtime.EffectiveConfig.Delivery.Remote)),
+		},
 	}
 	if agentWindow := primaryAgentWindow(runtime.EffectiveConfig); agentWindow != nil {
 		state.PrimaryAgentWindow = agentWindow.Name
@@ -193,6 +227,7 @@ func (a *App) Up(ctx context.Context, opts UpOptions) (TaskSummary, error) {
 		fmt.Fprintf(a.stderr, "Configured base branch %q not found; using current branch %q\n", state.BaseBranch, resolvedBase)
 	}
 	state.BaseBranch = resolvedBase
+	state.Delivery.BaseRef = normalizeBaseBranch(state.BaseBranch, state.Delivery.Remote)
 
 	managedEnvFiles, portBindings, err := buildTaskEnvState(runtime.EffectiveConfig)
 	if err != nil {
@@ -206,6 +241,11 @@ func (a *App) Up(ctx context.Context, opts UpOptions) (TaskSummary, error) {
 
 	if err := a.git.CreateWorktree(ctx, runtime.RepoRoot, state.Branch, state.WorktreePath, state.BaseBranch); err != nil {
 		return a.failState(state, err)
+	}
+	if runtime.EffectiveConfig.GitHub.Enabled {
+		if err := a.git.SetBranchMergeBase(ctx, runtime.RepoRoot, state.Branch, state.Delivery.Remote, state.BaseBranch); err != nil {
+			return a.failState(state, err)
+		}
 	}
 	state.UpdatedAt = a.now()
 	if err := a.state.Save(state); err != nil {
@@ -239,13 +279,15 @@ func (a *App) Up(ctx context.Context, opts UpOptions) (TaskSummary, error) {
 	}
 
 	return TaskSummary{
-		TaskID:   state.TaskID,
-		RepoRoot: state.RepoRoot,
-		Worktree: state.WorktreePath,
-		Branch:   state.Branch,
-		Session:  state.TmuxSession,
-		Surface:  state.Surface,
-		Status:   state.Status,
+		TaskID:    state.TaskID,
+		TaskTitle: state.TaskRef.Title,
+		RepoRoot:  state.RepoRoot,
+		Worktree:  state.WorktreePath,
+		Branch:    state.Branch,
+		Session:   state.TmuxSession,
+		Surface:   state.Surface,
+		Status:    state.Status,
+		Delivery:  state.Delivery,
 	}, nil
 }
 
@@ -269,6 +311,7 @@ func (a *App) reconcileExisting(ctx context.Context, runtime RuntimeConfig, stat
 	}
 	return TaskSummary{
 		TaskID:      state.TaskID,
+		TaskTitle:   state.TaskRef.Title,
 		RepoRoot:    state.RepoRoot,
 		Worktree:    state.WorktreePath,
 		Branch:      state.Branch,
@@ -276,6 +319,7 @@ func (a *App) reconcileExisting(ctx context.Context, runtime RuntimeConfig, stat
 		Surface:     state.Surface,
 		Status:      state.Status,
 		ConfigDrift: configDrift,
+		Delivery:    state.Delivery,
 	}, nil
 }
 
@@ -300,13 +344,15 @@ func (a *App) Attach(ctx context.Context, opts CommonOptions, task string) (Task
 		return TaskSummary{}, err
 	}
 	return TaskSummary{
-		TaskID:   state.TaskID,
-		RepoRoot: state.RepoRoot,
-		Worktree: state.WorktreePath,
-		Branch:   state.Branch,
-		Session:  state.TmuxSession,
-		Surface:  state.Surface,
-		Status:   state.Status,
+		TaskID:    state.TaskID,
+		TaskTitle: state.TaskRef.Title,
+		RepoRoot:  state.RepoRoot,
+		Worktree:  state.WorktreePath,
+		Branch:    state.Branch,
+		Session:   state.TmuxSession,
+		Surface:   state.Surface,
+		Status:    state.Status,
+		Delivery:  state.Delivery,
 	}, nil
 }
 
@@ -337,13 +383,15 @@ func (a *App) Codex(ctx context.Context, opts CommonOptions, task string) (TaskS
 		return TaskSummary{}, err
 	}
 	return TaskSummary{
-		TaskID:   state.TaskID,
-		RepoRoot: state.RepoRoot,
-		Worktree: state.WorktreePath,
-		Branch:   state.Branch,
-		Session:  state.TmuxSession,
-		Surface:  state.Surface,
-		Status:   state.Status,
+		TaskID:    state.TaskID,
+		TaskTitle: state.TaskRef.Title,
+		RepoRoot:  state.RepoRoot,
+		Worktree:  state.WorktreePath,
+		Branch:    state.Branch,
+		Session:   state.TmuxSession,
+		Surface:   state.Surface,
+		Status:    state.Status,
+		Delivery:  state.Delivery,
 	}, nil
 }
 
@@ -398,14 +446,16 @@ func (a *App) runNamedCommand(ctx context.Context, opts VerifyOptions, name stri
 		return TaskSummary{}, err
 	}
 	return TaskSummary{
-		TaskID:   state.TaskID,
-		RepoRoot: state.RepoRoot,
-		Worktree: state.WorktreePath,
-		Branch:   state.Branch,
-		Session:  state.TmuxSession,
-		Surface:  state.Surface,
-		Status:   state.Status,
-		LogPath:  logPath,
+		TaskID:    state.TaskID,
+		TaskTitle: state.TaskRef.Title,
+		RepoRoot:  state.RepoRoot,
+		Worktree:  state.WorktreePath,
+		Branch:    state.Branch,
+		Session:   state.TmuxSession,
+		Surface:   state.Surface,
+		Status:    state.Status,
+		LogPath:   logPath,
+		Delivery:  state.Delivery,
 	}, nil
 }
 
@@ -438,13 +488,15 @@ func (a *App) Down(ctx context.Context, opts DownOptions) (TaskSummary, error) {
 				return TaskSummary{}, err
 			}
 			return TaskSummary{
-				TaskID:   state.TaskID,
-				RepoRoot: state.RepoRoot,
-				Worktree: state.WorktreePath,
-				Branch:   state.Branch,
-				Session:  state.TmuxSession,
-				Surface:  state.Surface,
-				Status:   "deleted",
+				TaskID:    state.TaskID,
+				TaskTitle: state.TaskRef.Title,
+				RepoRoot:  state.RepoRoot,
+				Worktree:  state.WorktreePath,
+				Branch:    state.Branch,
+				Session:   state.TmuxSession,
+				Surface:   state.Surface,
+				Status:    "deleted",
+				Delivery:  state.Delivery,
 			}, nil
 		}
 		fmt.Fprintf(a.stderr, "Resuming teardown for task %q after an interrupted create\n", state.TaskRef.Title)
@@ -512,13 +564,15 @@ func (a *App) Down(ctx context.Context, opts DownOptions) (TaskSummary, error) {
 		return a.failState(state, err)
 	}
 	return TaskSummary{
-		TaskID:   state.TaskID,
-		RepoRoot: state.RepoRoot,
-		Worktree: state.WorktreePath,
-		Branch:   state.Branch,
-		Session:  state.TmuxSession,
-		Surface:  state.Surface,
-		Status:   "deleted",
+		TaskID:    state.TaskID,
+		TaskTitle: state.TaskRef.Title,
+		RepoRoot:  state.RepoRoot,
+		Worktree:  state.WorktreePath,
+		Branch:    state.Branch,
+		Session:   state.TmuxSession,
+		Surface:   state.Surface,
+		Status:    "deleted",
+		Delivery:  state.Delivery,
 	}, nil
 }
 
@@ -580,13 +634,15 @@ func (a *App) Repair(ctx context.Context, opts CommonOptions, task string) (Task
 		return TaskSummary{}, err
 	}
 	return TaskSummary{
-		TaskID:   state.TaskID,
-		RepoRoot: state.RepoRoot,
-		Worktree: state.WorktreePath,
-		Branch:   state.Branch,
-		Session:  state.TmuxSession,
-		Surface:  state.Surface,
-		Status:   state.Status,
+		TaskID:    state.TaskID,
+		TaskTitle: state.TaskRef.Title,
+		RepoRoot:  state.RepoRoot,
+		Worktree:  state.WorktreePath,
+		Branch:    state.Branch,
+		Session:   state.TmuxSession,
+		Surface:   state.Surface,
+		Status:    state.Status,
+		Delivery:  state.Delivery,
 	}, nil
 }
 
@@ -636,6 +692,21 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) ([]DoctorCheck, er
 	})
 
 	if runtimeLoaded {
+		if runtime.EffectiveConfig.GitHub.Enabled {
+			_, err := a.exec.Run(ctx, "", nil, "sh", "-lc", "command -v gh")
+			checks = append(checks, DoctorCheck{
+				Name:    "binary:gh",
+				OK:      err == nil,
+				Details: "gh",
+			})
+			authErr := a.gh.AuthStatus(ctx, runtime.RepoRoot)
+			checks = append(checks, DoctorCheck{
+				Name:    "gh-auth",
+				OK:      authErr == nil,
+				Details: "gh auth status",
+			})
+		}
+
 		for _, server := range runtime.Config.Requirements.MCPServers {
 			result, err := a.exec.Run(ctx, "", nil, "codex", "mcp", "list", "--json")
 			ok := err == nil && strings.Contains(result.Stdout, server)
@@ -653,6 +724,17 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) ([]DoctorCheck, er
 				Details: command,
 			})
 		}
+
+		result, err := a.exec.Run(ctx, runtime.RepoRoot, nil, "git", "config", "--bool", "rerere.enabled")
+		details := "consider enabling git rerere to reuse conflict resolutions during repeated syncs"
+		if err == nil && strings.TrimSpace(result.Stdout) == "true" {
+			details = "git rerere enabled"
+		}
+		checks = append(checks, DoctorCheck{
+			Name:    "advice:rerere",
+			OK:      true,
+			Details: details,
+		})
 	}
 
 	return checks, nil
@@ -669,13 +751,15 @@ func (a *App) failState(state TaskState, err error) (TaskSummary, error) {
 	state.UpdatedAt = a.now()
 	_ = a.state.Save(state)
 	return TaskSummary{
-		TaskID:   state.TaskID,
-		RepoRoot: state.RepoRoot,
-		Worktree: state.WorktreePath,
-		Branch:   state.Branch,
-		Session:  state.TmuxSession,
-		Surface:  state.Surface,
-		Status:   state.Status,
+		TaskID:    state.TaskID,
+		TaskTitle: state.TaskRef.Title,
+		RepoRoot:  state.RepoRoot,
+		Worktree:  state.WorktreePath,
+		Branch:    state.Branch,
+		Session:   state.TmuxSession,
+		Surface:   state.Surface,
+		Status:    state.Status,
+		Delivery:  state.Delivery,
 	}, err
 }
 
@@ -882,6 +966,12 @@ func resolveCommand(cfg EffectiveConfig, state TaskState, name string, surface s
 			return "", "", errors.New("commands.review is not configured")
 		}
 		return command, "review", nil
+	}
+	if name != "verify" {
+		if command, ok := cfg.Commands[name]; ok && command != "" {
+			return command, name, nil
+		}
+		return "", "", fmt.Errorf("commands.%s is not configured", name)
 	}
 	if surface == "" {
 		surface = state.Surface

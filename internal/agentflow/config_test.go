@@ -173,7 +173,14 @@ func TestWorkflowTrustEntriesIncludeSideEffectfulWorkflow(t *testing.T) {
 		Ports: PortsConfig{
 			Bindings: []PortBindingConfig{{Target: ".env.agentflow", Key: "PORT", Start: 4101, End: 4199}},
 		},
+		Delivery: DeliveryConfig{
+			Remote:       "origin",
+			SyncStrategy: "rebase",
+		},
 		Commands: map[string]string{"verify_quick": "go test ./..."},
+		GitHub: GitHubConfig{
+			Enabled: true,
+		},
 		Agents: map[string]AgentConfig{
 			"default": {Command: "codex --no-alt-screen"},
 		},
@@ -189,9 +196,11 @@ func TestWorkflowTrustEntriesIncludeSideEffectfulWorkflow(t *testing.T) {
 		"copy bootstrap env file: .env.example -> .env.local",
 		"write managed env file: .env.agentflow",
 		"write preferred port binding: PORT -> .env.agentflow [4101-4199]",
+		"sync task branches against origin using rebase",
 		"run command verify_quick: go test ./...",
 		"run agent default: codex --no-alt-screen",
 		"run tmux window editor: nvim .",
+		"create, inspect, and merge pull requests with gh",
 	}
 	for _, want := range expected {
 		if !contains(entries, want) {
@@ -383,6 +392,9 @@ func TestSampleConfigParses(t *testing.T) {
 	if len(cfg.Tmux.Windows) == 0 || len(cfg.Agents) == 0 {
 		t.Fatalf("expected sample config to declare explicit workflow, got %+v", cfg)
 	}
+	if cfg.Delivery.Remote == "" || cfg.Delivery.SyncStrategy == "" || len(cfg.Delivery.Preflight) == 0 {
+		t.Fatalf("expected sample config to declare delivery flow, got %+v", cfg.Delivery)
+	}
 }
 
 func TestWriteConfigWritesExpectedPath(t *testing.T) {
@@ -412,10 +424,37 @@ func TestRenderEffectiveConfigOmitsEmptyFields(t *testing.T) {
 		"command = ''",
 		"bindings = []",
 		"mcp_servers = []",
+		"labels = []",
+		"reviewers = []",
 	} {
 		if strings.Contains(content, unexpected) {
 			t.Fatalf("expected rendered config to omit %q, got:\n%s", unexpected, content)
 		}
+	}
+}
+
+func TestWorkflowFingerprintChangesForDeliveryAndGitHubSections(t *testing.T) {
+	t.Parallel()
+
+	cfg := ConfigFile{
+		Delivery: DeliveryConfig{
+			Remote:       "origin",
+			SyncStrategy: "rebase",
+		},
+	}
+	first, err := workflowFingerprint(cfg)
+	if err != nil {
+		t.Fatalf("workflowFingerprint returned error: %v", err)
+	}
+
+	cfg.GitHub.Enabled = true
+	second, err := workflowFingerprint(cfg)
+	if err != nil {
+		t.Fatalf("workflowFingerprint returned error: %v", err)
+	}
+
+	if first == second {
+		t.Fatal("expected delivery/github changes to affect workflow fingerprint")
 	}
 }
 

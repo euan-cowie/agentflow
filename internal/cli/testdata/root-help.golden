@@ -10,10 +10,15 @@ Available Commands:
   config      Inspect or write repo config
   doctor      Check required binaries and repo configuration
   down        Tear down a task worktree and session
+  gc          Clean up merged task worktrees and sessions
   help        Help about any command
+  land        Run preflight checks and enable merge for a task pull request
   list        List tracked tasks
   repair      Repair drift between task state, worktree metadata, and tmux
   review      Run the configured review command for a task
+  status      Show local and delivery status for one task or all tasks
+  submit      Push a task branch and create or reuse a pull request
+  sync        Sync one or more task branches with the repo base branch
   up          Create or resume a task worktree and tmux session
   verify      Run the configured verify command for a task
 

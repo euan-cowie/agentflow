@@ -27,6 +27,8 @@ func defaultEffectiveConfig() EffectiveConfig {
 		Tmux: TmuxConfig{
 			SessionName: "{{repo}}-{{task}}-{{id}}",
 		},
+		Delivery:     DeliveryConfig{},
+		GitHub:       GitHubConfig{},
 		Requirements: RequirementsConfig{},
 	}
 }
@@ -59,6 +61,39 @@ func applyConfigFile(base EffectiveConfig, cfg ConfigFile) EffectiveConfig {
 	}
 	if len(cfg.Ports.Bindings) > 0 {
 		out.Ports.Bindings = append([]PortBindingConfig(nil), cfg.Ports.Bindings...)
+	}
+	if cfg.Delivery.Remote != "" {
+		out.Delivery.Remote = cfg.Delivery.Remote
+	}
+	if cfg.Delivery.SyncStrategy != "" {
+		out.Delivery.SyncStrategy = cfg.Delivery.SyncStrategy
+	}
+	if len(cfg.Delivery.Preflight) > 0 {
+		out.Delivery.Preflight = append([]string(nil), cfg.Delivery.Preflight...)
+	}
+	if cfg.Delivery.Cleanup != "" {
+		out.Delivery.Cleanup = cfg.Delivery.Cleanup
+	}
+	if cfg.GitHub.Enabled {
+		out.GitHub.Enabled = true
+	}
+	if cfg.GitHub.DraftOnSubmit {
+		out.GitHub.DraftOnSubmit = true
+	}
+	if cfg.GitHub.MergeMethod != "" {
+		out.GitHub.MergeMethod = cfg.GitHub.MergeMethod
+	}
+	if cfg.GitHub.AutoMerge {
+		out.GitHub.AutoMerge = true
+	}
+	if cfg.GitHub.DeleteRemoteBranch {
+		out.GitHub.DeleteRemoteBranch = true
+	}
+	if len(cfg.GitHub.Labels) > 0 {
+		out.GitHub.Labels = append([]string(nil), cfg.GitHub.Labels...)
+	}
+	if len(cfg.GitHub.Reviewers) > 0 {
+		out.GitHub.Reviewers = append([]string(nil), cfg.GitHub.Reviewers...)
 	}
 	if len(cfg.Commands) > 0 {
 		if out.Commands == nil {
@@ -214,7 +249,32 @@ func validateEffectiveConfig(cfg EffectiveConfig) error {
 			return fmt.Errorf("port binding %q must describe a valid range", binding.Key)
 		}
 	}
+	if cfg.Delivery.Remote != "" {
+		if strings.TrimSpace(cfg.Delivery.Remote) == "" {
+			return errors.New("delivery.remote must not be empty")
+		}
+	}
+	if cfg.Delivery.SyncStrategy != "" {
+		switch cfg.Delivery.SyncStrategy {
+		case "rebase", "merge":
+		default:
+			return fmt.Errorf("delivery.sync_strategy must be one of rebase or merge")
+		}
+	}
+	if cfg.Delivery.Cleanup != "" {
+		switch cfg.Delivery.Cleanup {
+		case "async", "manual":
+		default:
+			return fmt.Errorf("delivery.cleanup must be one of async or manual")
+		}
+	}
+	for _, preflight := range cfg.Delivery.Preflight {
+		if strings.TrimSpace(preflight) == "" {
+			return errors.New("delivery.preflight entries must not be empty")
+		}
+	}
 	primaryAgents := 0
+	referencedAgents := map[string]struct{}{}
 	for _, window := range cfg.Tmux.Windows {
 		if window.Name == "" {
 			return errors.New("tmux window name must not be empty")
@@ -227,21 +287,30 @@ func validateEffectiveConfig(cfg EffectiveConfig) error {
 		}
 		if window.Agent != "" {
 			primaryAgents++
+			referencedAgents[window.Agent] = struct{}{}
 			if _, ok := cfg.Agents[window.Agent]; !ok {
 				return fmt.Errorf("tmux window %q references unknown agent %q", window.Name, window.Agent)
 			}
 		}
 	}
 	for name, agent := range cfg.Agents {
-		if strings.TrimSpace(agent.Command) == "" {
-			return fmt.Errorf("agent %q must declare command", name)
-		}
+		_, referenced := referencedAgents[name]
 		if agent.Runner != "" && agent.Runner != "codex" {
 			return fmt.Errorf("agent %q declares unsupported runner %q", name, agent.Runner)
+		}
+		if referenced && strings.TrimSpace(agent.Command) == "" {
+			return fmt.Errorf("agent %q must declare command", name)
 		}
 	}
 	if primaryAgents > 1 {
 		return errors.New("v1 supports at most one tmux agent window")
+	}
+	if cfg.GitHub.MergeMethod != "" {
+		switch cfg.GitHub.MergeMethod {
+		case "auto", "squash", "merge", "rebase":
+		default:
+			return fmt.Errorf("github.merge_method must be one of auto, squash, merge, or rebase")
+		}
 	}
 	return nil
 }
@@ -269,6 +338,8 @@ type workflowConfig struct {
 	Bootstrap BootstrapConfig        `json:"bootstrap"`
 	Env       EnvConfig              `json:"env"`
 	Ports     PortsConfig            `json:"ports"`
+	Delivery  DeliveryConfig         `json:"delivery"`
+	GitHub    GitHubConfig           `json:"github"`
 	Commands  map[string]string      `json:"commands"`
 	Agents    map[string]AgentConfig `json:"agents"`
 	Tmux      TmuxConfig             `json:"tmux"`
@@ -282,6 +353,8 @@ func workflowFingerprint(cfg ConfigFile) (string, error) {
 		Bootstrap: cfg.Bootstrap,
 		Env:       cfg.Env,
 		Ports:     cfg.Ports,
+		Delivery:  cfg.Delivery,
+		GitHub:    cfg.GitHub,
 		Commands:  cfg.Commands,
 		Agents:    cfg.Agents,
 		Tmux:      cfg.Tmux,
@@ -298,6 +371,17 @@ func hasWorkflowConfig(cfg ConfigFile) bool {
 		len(cfg.Bootstrap.EnvFiles) > 0 ||
 		len(cfg.Env.Targets) > 0 ||
 		len(cfg.Ports.Bindings) > 0 ||
+		cfg.Delivery.Remote != "" ||
+		cfg.Delivery.SyncStrategy != "" ||
+		len(cfg.Delivery.Preflight) > 0 ||
+		cfg.Delivery.Cleanup != "" ||
+		cfg.GitHub.Enabled ||
+		cfg.GitHub.DraftOnSubmit ||
+		cfg.GitHub.MergeMethod != "" ||
+		cfg.GitHub.AutoMerge ||
+		cfg.GitHub.DeleteRemoteBranch ||
+		len(cfg.GitHub.Labels) > 0 ||
+		len(cfg.GitHub.Reviewers) > 0 ||
 		len(cfg.Commands) > 0 ||
 		len(cfg.Agents) > 0 ||
 		cfg.Tmux.SessionName != "" ||
@@ -326,6 +410,13 @@ func workflowTrustEntries(cfg ConfigFile) []string {
 			entries = append(entries, fmt.Sprintf("write preferred port binding: %s -> %s [%d-%d]", binding.Key, binding.Target, binding.Start, binding.End))
 		}
 	}
+	if cfg.Delivery.Remote != "" {
+		strategy := cfg.Delivery.SyncStrategy
+		if strategy == "" {
+			strategy = "rebase"
+		}
+		entries = append(entries, fmt.Sprintf("sync task branches against %s using %s", cfg.Delivery.Remote, strategy))
+	}
 	for name, command := range cfg.Commands {
 		if strings.TrimSpace(command) != "" {
 			entries = append(entries, fmt.Sprintf("run command %s: %s", name, command))
@@ -340,6 +431,9 @@ func workflowTrustEntries(cfg ConfigFile) []string {
 		if strings.TrimSpace(window.Command) != "" {
 			entries = append(entries, fmt.Sprintf("run tmux window %s: %s", window.Name, window.Command))
 		}
+	}
+	if cfg.GitHub.Enabled {
+		entries = append(entries, "create, inspect, and merge pull requests with gh")
 	}
 	return uniqueStrings(entries)
 }
@@ -368,6 +462,8 @@ type renderConfig struct {
 	Bootstrap    *renderBootstrapConfig       `toml:"bootstrap,omitempty" json:"bootstrap,omitempty"`
 	Env          *EnvConfig                   `toml:"env,omitempty" json:"env,omitempty"`
 	Ports        *renderPortsConfig           `toml:"ports,omitempty" json:"ports,omitempty"`
+	Delivery     *DeliveryConfig              `toml:"delivery,omitempty" json:"delivery,omitempty"`
+	GitHub       *GitHubConfig                `toml:"github,omitempty" json:"github,omitempty"`
 	Commands     map[string]string            `toml:"commands,omitempty" json:"commands,omitempty"`
 	Agents       map[string]renderAgentConfig `toml:"agents,omitempty" json:"agents,omitempty"`
 	Tmux         *renderTmuxConfig            `toml:"tmux,omitempty" json:"tmux,omitempty"`
@@ -462,6 +558,14 @@ func buildRenderableEffectiveConfig(cfg EffectiveConfig) renderConfig {
 		}
 		rendered.Ports = &ports
 	}
+	if cfg.Delivery.Remote != "" || cfg.Delivery.SyncStrategy != "" || len(cfg.Delivery.Preflight) > 0 || cfg.Delivery.Cleanup != "" {
+		delivery := cfg.Delivery
+		rendered.Delivery = &delivery
+	}
+	if cfg.GitHub.Enabled || cfg.GitHub.DraftOnSubmit || cfg.GitHub.MergeMethod != "" || cfg.GitHub.AutoMerge || cfg.GitHub.DeleteRemoteBranch || len(cfg.GitHub.Labels) > 0 || len(cfg.GitHub.Reviewers) > 0 {
+		github := cfg.GitHub
+		rendered.GitHub = &github
+	}
 	if len(cfg.Commands) > 0 {
 		rendered.Commands = cfg.Commands
 	}
@@ -515,6 +619,12 @@ default_surface = "default"
 
 [env]
 targets = [{ path = ".env.agentflow" }]
+
+[delivery]
+remote = "origin"
+sync_strategy = "rebase"
+preflight = ["review", "verify"]
+cleanup = "async"
 
 [commands]
 review = "make review"

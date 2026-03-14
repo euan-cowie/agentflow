@@ -101,3 +101,25 @@ func canonicalPath(path string) string {
 	}
 	return resolved
 }
+
+func normalizeBaseBranch(baseRef, remote string) string {
+	baseRef = strings.TrimSpace(baseRef)
+	remote = strings.TrimSpace(remote)
+	if baseRef == "" {
+		return ""
+	}
+	if remote != "" {
+		prefix := remote + "/"
+		if strings.HasPrefix(baseRef, prefix) {
+			return strings.TrimPrefix(baseRef, prefix)
+		}
+		remotePrefix := "refs/remotes/" + remote + "/"
+		if strings.HasPrefix(baseRef, remotePrefix) {
+			return strings.TrimPrefix(baseRef, remotePrefix)
+		}
+	}
+	if strings.HasPrefix(baseRef, "refs/heads/") {
+		return strings.TrimPrefix(baseRef, "refs/heads/")
+	}
+	return baseRef
+}
