@@ -3,6 +3,7 @@ package agentflow
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 )
@@ -435,11 +436,7 @@ func (a *App) inspectTaskStatus(ctx context.Context, runtime RuntimeConfig, stat
 		status.IssueURL = state.TaskRef.URL
 		status.IssueState = state.IssueState
 		status.Delivery = state.Delivery
-		if state.TaskRef.Title != before.TaskRef.Title ||
-			state.TaskRef.URL != before.TaskRef.URL ||
-			state.TaskRef.ID != before.TaskRef.ID ||
-			state.IssueState != before.IssueState ||
-			state.Delivery != before.Delivery {
+		if linearTaskSnapshotChanged(before, state) {
 			state.UpdatedAt = a.now()
 			if err := a.state.Save(state); err != nil {
 				return status, err
@@ -476,11 +473,7 @@ func (a *App) syncTask(ctx context.Context, runtime RuntimeConfig, state TaskSta
 	if err := a.reconcileLinearTask(ctx, runtime, &state); err != nil {
 		return a.failState(state, err)
 	}
-	if state.TaskRef.Title != before.TaskRef.Title ||
-		state.TaskRef.URL != before.TaskRef.URL ||
-		state.TaskRef.ID != before.TaskRef.ID ||
-		state.IssueState != before.IssueState ||
-		state.Delivery != before.Delivery {
+	if linearTaskSnapshotChanged(before, state) {
 		state.UpdatedAt = a.now()
 		if err := a.state.Save(state); err != nil {
 			return TaskSummary{}, err
@@ -576,6 +569,15 @@ func (a *App) syncTaskState(ctx context.Context, runtime RuntimeConfig, state Ta
 		rewrote = false
 	}
 	return state, rewrote, nil
+}
+
+func linearTaskSnapshotChanged(before, after TaskState) bool {
+	return after.TaskRef.Title != before.TaskRef.Title ||
+		after.TaskRef.URL != before.TaskRef.URL ||
+		after.TaskRef.ID != before.TaskRef.ID ||
+		after.IssueState != before.IssueState ||
+		!reflect.DeepEqual(after.IssueContext, before.IssueContext) ||
+		after.Delivery != before.Delivery
 }
 
 func requiredDeliveryRemote(runtime RuntimeConfig) (string, error) {

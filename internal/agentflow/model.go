@@ -136,26 +136,27 @@ type TaskRef struct {
 }
 
 type TaskState struct {
-	TaskID              string             `json:"task_id"`
-	TaskRef             TaskRef            `json:"task_ref"`
-	Status              string             `json:"status"`
-	FailureReason       string             `json:"failure_reason,omitempty"`
-	RepoRoot            string             `json:"repo_root"`
-	RepoID              string             `json:"repo_id"`
-	WorktreePath        string             `json:"worktree_path"`
-	Branch              string             `json:"branch"`
-	BaseBranch          string             `json:"base_branch"`
-	Surface             string             `json:"surface"`
-	TmuxSession         string             `json:"tmux_session"`
-	PrimaryAgentWindow  string             `json:"primary_agent_window"`
-	CodexSessionID      string             `json:"codex_session_id,omitempty"`
-	PortBindings        []PortBindingState `json:"port_bindings,omitempty"`
-	ManagedEnvFiles     []string           `json:"managed_env_files,omitempty"`
-	WorkflowFingerprint string             `json:"workflow_fingerprint,omitempty"`
-	IssueState          string             `json:"issue_state,omitempty"`
-	Delivery            TaskDeliveryState  `json:"delivery,omitempty"`
-	CreatedAt           time.Time          `json:"created_at"`
-	UpdatedAt           time.Time          `json:"updated_at"`
+	TaskID              string              `json:"task_id"`
+	TaskRef             TaskRef             `json:"task_ref"`
+	Status              string              `json:"status"`
+	FailureReason       string              `json:"failure_reason,omitempty"`
+	RepoRoot            string              `json:"repo_root"`
+	RepoID              string              `json:"repo_id"`
+	WorktreePath        string              `json:"worktree_path"`
+	Branch              string              `json:"branch"`
+	BaseBranch          string              `json:"base_branch"`
+	Surface             string              `json:"surface"`
+	TmuxSession         string              `json:"tmux_session"`
+	PrimaryAgentWindow  string              `json:"primary_agent_window"`
+	CodexSessionID      string              `json:"codex_session_id,omitempty"`
+	PortBindings        []PortBindingState  `json:"port_bindings,omitempty"`
+	ManagedEnvFiles     []string            `json:"managed_env_files,omitempty"`
+	WorkflowFingerprint string              `json:"workflow_fingerprint,omitempty"`
+	IssueState          string              `json:"issue_state,omitempty"`
+	IssueContext        *LinearIssueContext `json:"issue_context,omitempty"`
+	Delivery            TaskDeliveryState   `json:"delivery,omitempty"`
+	CreatedAt           time.Time           `json:"created_at"`
+	UpdatedAt           time.Time           `json:"updated_at"`
 }
 
 type TaskDeliveryState struct {
@@ -177,6 +178,34 @@ type PortBindingState struct {
 	Target string `json:"target"`
 	Key    string `json:"key"`
 	Port   int    `json:"port"`
+}
+
+type LinearIssueContext struct {
+	TeamName           string                  `json:"team_name,omitempty"`
+	TeamKey            string                  `json:"team_key,omitempty"`
+	Description        string                  `json:"description,omitempty"`
+	Labels             []string                `json:"labels,omitempty"`
+	Comments           []LinearIssueComment    `json:"comments,omitempty"`
+	HasMoreComments    bool                    `json:"has_more_comments,omitempty"`
+	Attachments        []LinearIssueAttachment `json:"attachments,omitempty"`
+	HasMoreAttachments bool                    `json:"has_more_attachments,omitempty"`
+}
+
+type LinearIssueComment struct {
+	ID        string    `json:"id,omitempty"`
+	Author    string    `json:"author,omitempty"`
+	Body      string    `json:"body,omitempty"`
+	URL       string    `json:"url,omitempty"`
+	CreatedAt time.Time `json:"created_at,omitempty"`
+}
+
+type LinearIssueAttachment struct {
+	ID         string    `json:"id,omitempty"`
+	Title      string    `json:"title,omitempty"`
+	Subtitle   string    `json:"subtitle,omitempty"`
+	URL        string    `json:"url,omitempty"`
+	SourceType string    `json:"source_type,omitempty"`
+	CreatedAt  time.Time `json:"created_at,omitempty"`
 }
 
 type TaskSummary struct {

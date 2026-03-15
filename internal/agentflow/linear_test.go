@@ -20,12 +20,54 @@ func TestLinearOpsIssueUsesAuthorizationHeader(t *testing.T) {
 		return linearHTTPResponse(t, map[string]any{
 			"data": map[string]any{
 				"issue": map[string]any{
-					"id":         "issue-1",
-					"identifier": "AF-123",
-					"title":      "Fix auth flow",
-					"url":        "https://linear.app/example/issue/AF-123",
-					"team":       map[string]any{"id": "team-1", "key": "AF", "name": "Agentflow"},
-					"state":      map[string]any{"id": "state-1", "name": "Todo", "type": "unstarted"},
+					"id":          "issue-1",
+					"identifier":  "AF-123",
+					"title":       "Fix auth flow",
+					"url":         "https://linear.app/example/issue/AF-123",
+					"updatedAt":   "2026-03-15T10:00:00Z",
+					"description": "Detailed description",
+					"team":        map[string]any{"id": "team-1", "key": "AF", "name": "Agentflow"},
+					"state":       map[string]any{"id": "state-1", "name": "Todo", "type": "unstarted"},
+					"labels": map[string]any{
+						"nodes": []map[string]any{
+							{"name": "Frontend"},
+							{"name": "Bug"},
+						},
+					},
+					"comments": map[string]any{
+						"pageInfo": map[string]any{"hasNextPage": true},
+						"nodes": []map[string]any{
+							{
+								"id":        "comment-1",
+								"body":      "Investigate the auth middleware",
+								"createdAt": "2026-03-14T09:00:00Z",
+								"url":       "https://linear.app/example/comment/comment-1",
+								"user":      map[string]any{"name": "Alice"},
+								"parent":    nil,
+							},
+							{
+								"id":        "comment-2",
+								"body":      "Nested reply should be omitted",
+								"createdAt": "2026-03-14T10:00:00Z",
+								"url":       "https://linear.app/example/comment/comment-2",
+								"user":      map[string]any{"name": "Bob"},
+								"parent":    map[string]any{"id": "comment-1"},
+							},
+						},
+					},
+					"attachments": map[string]any{
+						"pageInfo": map[string]any{"hasNextPage": true},
+						"nodes": []map[string]any{
+							{
+								"id":         "attachment-1",
+								"title":      "Spec",
+								"subtitle":   "Google Doc",
+								"url":        "https://example.com/spec",
+								"sourceType": "link",
+								"createdAt":  "2026-03-14T08:00:00Z",
+							},
+						},
+					},
 				},
 			},
 		}), nil
@@ -40,6 +82,24 @@ func TestLinearOpsIssueUsesAuthorizationHeader(t *testing.T) {
 	}
 	if issue.Identifier != "AF-123" || issue.State.Name != "Todo" {
 		t.Fatalf("unexpected issue: %+v", issue)
+	}
+	if issue.Context.Description != "Detailed description" {
+		t.Fatalf("expected description to be loaded, got %+v", issue.Context)
+	}
+	if len(issue.Context.Labels) != 2 || issue.Context.Labels[0] != "Bug" || issue.Context.Labels[1] != "Frontend" {
+		t.Fatalf("expected labels to be sorted, got %+v", issue.Context.Labels)
+	}
+	if len(issue.Context.Comments) != 1 || issue.Context.Comments[0].Author != "Alice" {
+		t.Fatalf("expected only top-level comments to be loaded, got %+v", issue.Context.Comments)
+	}
+	if !issue.Context.HasMoreComments {
+		t.Fatalf("expected issue to record more comments availability, got %+v", issue.Context)
+	}
+	if len(issue.Context.Attachments) != 1 || issue.Context.Attachments[0].Title != "Spec" {
+		t.Fatalf("expected attachments to be loaded, got %+v", issue.Context.Attachments)
+	}
+	if !issue.Context.HasMoreAttachments {
+		t.Fatalf("expected issue to record more attachments availability, got %+v", issue.Context)
 	}
 }
 

@@ -530,6 +530,493 @@ api_key_env = "LINEAR_API_KEY"
 	}
 }
 
+func TestUpDoesNotTransitionLinearIssueBeforeTmuxStarts(t *testing.T) {
+	repo := initCommittedRepo(t)
+	installFailingTmuxOnNewSession(t)
+	writeTestRepoConfig(t, repo, testRepoWorkflowConfig+`
+
+[linear]
+api_key_env = "LINEAR_API_KEY"
+`)
+
+	issueUpdateCalls := 0
+	app, _, _ := newTestApp(t)
+	app.linear = newLinearTestOps(t, func(r *http.Request) (*http.Response, error) {
+		payload := readLinearPayload(t, r.Body)
+		query := payload["query"].(string)
+		switch {
+		case strings.Contains(query, "query Issue"):
+			return linearHTTPResponse(t, map[string]any{
+				"data": map[string]any{
+					"issue": map[string]any{
+						"id":         "issue-1",
+						"identifier": "AF-123",
+						"title":      "Fix auth flow",
+						"url":        "https://linear.app/example/issue/AF-123",
+						"team":       map[string]any{"id": "team-1", "key": "AF", "name": "Agentflow"},
+						"state":      map[string]any{"id": "state-1", "name": "Todo", "type": "unstarted"},
+					},
+				},
+			}), nil
+		case strings.Contains(query, "mutation IssueUpdate"):
+			issueUpdateCalls++
+			t.Fatal("unexpected Linear transition before tmux startup succeeded")
+		}
+		t.Fatalf("unexpected query: %s", query)
+		return nil, nil
+	})
+	t.Setenv("LINEAR_API_KEY", "test-token")
+
+	_, err := app.Up(context.Background(), UpOptions{
+		CommonOptions: CommonOptions{RepoPath: repo},
+		Task:          "AF-123",
+	})
+	if err == nil {
+		t.Fatal("expected Up to fail when tmux startup fails")
+	}
+	if issueUpdateCalls != 0 {
+		t.Fatalf("expected no Linear transitions, got %d", issueUpdateCalls)
+	}
+}
+
+func TestReconcileExistingDoesNotTransitionLinearIssueBeforeTmuxStarts(t *testing.T) {
+	repo := initCommittedRepo(t)
+	installFailingTmuxOnNewSession(t)
+	writeTestRepoConfig(t, repo, testRepoWorkflowConfig+`
+
+[linear]
+api_key_env = "LINEAR_API_KEY"
+`)
+
+	ctx := context.Background()
+	exec := Executor{}
+	git := NewGitOps(exec)
+	repoRoot, err := git.RepoRoot(ctx, repo)
+	if err != nil {
+		t.Fatalf("RepoRoot returned error: %v", err)
+	}
+	repoRoot, err = filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks returned error: %v", err)
+	}
+	ref, taskID, err := resolveLinearTask(repoRoot, LinearIssue{
+		ID:         "issue-1",
+		Identifier: "AF-123",
+		Title:      "Fix auth flow",
+		URL:        "https://linear.app/example/issue/AF-123",
+	})
+	if err != nil {
+		t.Fatalf("resolveLinearTask returned error: %v", err)
+	}
+
+	cfg := defaultEffectiveConfig()
+	cfg.Repo.Name = filepath.Base(repo)
+	branch := branchName(cfg, ref, taskID)
+	worktree := filepath.Join(t.TempDir(), ref.Slug+"-"+taskID[:6])
+	if err := git.CreateWorktree(ctx, repo, branch, worktree, "main"); err != nil {
+		t.Fatalf("CreateWorktree returned error: %v", err)
+	}
+
+	issueUpdateCalls := 0
+	app, _, _ := newTestApp(t)
+	app.linear = newLinearTestOps(t, func(r *http.Request) (*http.Response, error) {
+		payload := readLinearPayload(t, r.Body)
+		query := payload["query"].(string)
+		switch {
+		case strings.Contains(query, "query Issue"):
+			return linearHTTPResponse(t, map[string]any{
+				"data": map[string]any{
+					"issue": map[string]any{
+						"id":          "issue-1",
+						"identifier":  "AF-123",
+						"title":       "Fix auth flow",
+						"url":         "https://linear.app/example/issue/AF-123",
+						"description": "Fresh prompt context",
+						"team":        map[string]any{"id": "team-1", "key": "AF", "name": "Agentflow"},
+						"state":       map[string]any{"id": "state-1", "name": "Todo", "type": "unstarted"},
+					},
+				},
+			}), nil
+		case strings.Contains(query, "query WorkflowStates"), strings.Contains(query, "mutation IssueUpdate"):
+			issueUpdateCalls++
+			t.Fatal("unexpected Linear completion before tmux startup succeeded")
+		}
+		t.Fatalf("unexpected query: %s", query)
+		return nil, nil
+	})
+	t.Setenv("LINEAR_API_KEY", "test-token")
+
+	runtime, err := app.loadRuntime(ctx, repo)
+	if err != nil {
+		t.Fatalf("loadRuntime returned error: %v", err)
+	}
+	now := time.Now().UTC()
+	state := TaskState{
+		TaskID:       taskID,
+		TaskRef:      ref,
+		Status:       StatusReady,
+		RepoRoot:     repoRoot,
+		RepoID:       repoID(repoRoot),
+		WorktreePath: worktree,
+		Branch:       branch,
+		BaseBranch:   "main",
+		Surface:      runtime.EffectiveConfig.Repo.DefaultSurface,
+		TmuxSession:  renderSessionName(runtime.EffectiveConfig, ref, taskID),
+		Delivery: TaskDeliveryState{
+			State: DeliveryStateMerged,
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	_, err = app.reconcileExisting(ctx, runtime, state)
+	if err == nil {
+		t.Fatal("expected reconcileExisting to fail when tmux startup fails")
+	}
+	if issueUpdateCalls != 0 {
+		t.Fatalf("expected no Linear transitions, got %d", issueUpdateCalls)
+	}
+}
+
+func TestReconcileExistingRecreatesTmuxDuringLinearOutage(t *testing.T) {
+	repo := initCommittedRepo(t)
+	logPath := filepath.Join(t.TempDir(), "tmux.log")
+	installRecordingTmux(t, logPath)
+	writeTestRepoConfig(t, repo, testRepoWorkflowConfig+`
+
+[linear]
+api_key_env = "LINEAR_API_KEY"
+`)
+
+	ctx := context.Background()
+	exec := Executor{}
+	git := NewGitOps(exec)
+	repoRoot, err := git.RepoRoot(ctx, repo)
+	if err != nil {
+		t.Fatalf("RepoRoot returned error: %v", err)
+	}
+	repoRoot, err = filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks returned error: %v", err)
+	}
+	ref, taskID, err := resolveLinearTask(repoRoot, LinearIssue{
+		ID:         "issue-1",
+		Identifier: "AF-123",
+		Title:      "Fix auth flow",
+		URL:        "https://linear.app/example/issue/AF-123",
+	})
+	if err != nil {
+		t.Fatalf("resolveLinearTask returned error: %v", err)
+	}
+
+	cfg := defaultEffectiveConfig()
+	cfg.Repo.Name = filepath.Base(repo)
+	branch := branchName(cfg, ref, taskID)
+	worktree := filepath.Join(t.TempDir(), ref.Slug+"-"+taskID[:6])
+	if err := git.CreateWorktree(ctx, repo, branch, worktree, "main"); err != nil {
+		t.Fatalf("CreateWorktree returned error: %v", err)
+	}
+
+	app, _, _ := newTestApp(t)
+	app.linear = newLinearTestOps(t, func(r *http.Request) (*http.Response, error) {
+		return nil, fmt.Errorf("linear unavailable")
+	})
+	t.Setenv("LINEAR_API_KEY", "test-token")
+
+	runtime, err := app.loadRuntime(ctx, repo)
+	if err != nil {
+		t.Fatalf("loadRuntime returned error: %v", err)
+	}
+	now := time.Now().UTC()
+	state := TaskState{
+		TaskID:       taskID,
+		TaskRef:      ref,
+		Status:       StatusReady,
+		RepoRoot:     repoRoot,
+		RepoID:       repoID(repoRoot),
+		WorktreePath: worktree,
+		Branch:       branch,
+		BaseBranch:   "main",
+		Surface:      runtime.EffectiveConfig.Repo.DefaultSurface,
+		TmuxSession:  renderSessionName(runtime.EffectiveConfig, ref, taskID),
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+
+	_, err = app.reconcileExisting(ctx, runtime, state)
+	if err == nil {
+		t.Fatal("expected reconcileExisting to report the Linear outage")
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read tmux log: %v", err)
+	}
+	if !strings.Contains(string(logData), "new-session") {
+		t.Fatalf("expected tmux recovery to create a session, log=%q", string(logData))
+	}
+}
+
+func TestAttachRefreshesLinearContextBeforeRecreatingTmux(t *testing.T) {
+	repo := initCommittedRepo(t)
+	logPath := filepath.Join(t.TempDir(), "tmux.log")
+	installRecordingTmux(t, logPath)
+	writeTestRepoConfig(t, repo, testRepoWorkflowConfig+`
+
+[linear]
+api_key_env = "LINEAR_API_KEY"
+`)
+
+	ctx := context.Background()
+	exec := Executor{}
+	git := NewGitOps(exec)
+	repoRoot, err := git.RepoRoot(ctx, repo)
+	if err != nil {
+		t.Fatalf("RepoRoot returned error: %v", err)
+	}
+	repoRoot, err = filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks returned error: %v", err)
+	}
+	ref, taskID, err := resolveLinearTask(repoRoot, LinearIssue{
+		ID:         "issue-1",
+		Identifier: "AF-123",
+		Title:      "Fix auth flow",
+		URL:        "https://linear.app/example/issue/AF-123",
+	})
+	if err != nil {
+		t.Fatalf("resolveLinearTask returned error: %v", err)
+	}
+
+	cfg := defaultEffectiveConfig()
+	cfg.Repo.Name = filepath.Base(repo)
+	branch := branchName(cfg, ref, taskID)
+	worktree := filepath.Join(t.TempDir(), ref.Slug+"-"+taskID[:6])
+	if err := git.CreateWorktree(ctx, repo, branch, worktree, "main"); err != nil {
+		t.Fatalf("CreateWorktree returned error: %v", err)
+	}
+
+	app, _, _ := newTestApp(t)
+	app.linear = newLinearTestOps(t, func(r *http.Request) (*http.Response, error) {
+		payload := readLinearPayload(t, r.Body)
+		query := payload["query"].(string)
+		if !strings.Contains(query, "query Issue") {
+			t.Fatalf("unexpected query: %s", query)
+		}
+		return linearHTTPResponse(t, map[string]any{
+			"data": map[string]any{
+				"issue": map[string]any{
+					"id":          "issue-1",
+					"identifier":  "AF-123",
+					"title":       "Fix auth flow",
+					"url":         "https://linear.app/example/issue/AF-123",
+					"description": "Fresh prompt context",
+					"team":        map[string]any{"id": "team-1", "key": "AF", "name": "Agentflow"},
+					"state":       map[string]any{"id": "state-2", "name": "In Progress", "type": "started"},
+					"comments": map[string]any{
+						"nodes": []map[string]any{
+							{
+								"id":        "comment-1",
+								"body":      "Include this comment in the agent prompt.",
+								"createdAt": "2026-03-15T10:00:00Z",
+								"url":       "https://linear.app/example/comment/comment-1",
+								"user":      map[string]any{"name": "Alice"},
+								"parent":    nil,
+							},
+						},
+					},
+				},
+			},
+		}), nil
+	})
+	t.Setenv("LINEAR_API_KEY", "test-token")
+
+	now := time.Now().UTC()
+	state := TaskState{
+		TaskID:       taskID,
+		TaskRef:      ref,
+		Status:       StatusReady,
+		RepoRoot:     repoRoot,
+		RepoID:       repoID(repoRoot),
+		WorktreePath: worktree,
+		Branch:       branch,
+		BaseBranch:   "main",
+		Surface:      "default",
+		TmuxSession:  renderSessionName(cfg, ref, taskID),
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := app.state.Save(state); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	if _, err := app.Attach(ctx, CommonOptions{RepoPath: repo}, "AF-123"); err != nil {
+		t.Fatalf("Attach returned error: %v", err)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read tmux log: %v", err)
+	}
+	if !strings.Contains(string(logData), "Fresh prompt context") || !strings.Contains(string(logData), "Include this comment in the agent prompt.") {
+		t.Fatalf("expected recreated tmux command to include refreshed Linear context, log=%q", string(logData))
+	}
+	loaded, err := app.state.Load(repoID(repoRoot), taskID)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if loaded.IssueContext == nil || loaded.IssueContext.Description != "Fresh prompt context" {
+		t.Fatalf("expected refreshed issue context to be saved, got %+v", loaded.IssueContext)
+	}
+}
+
+func TestUpDoesNotTransitionLinearIssueWhenCodexWindowCreationFails(t *testing.T) {
+	repo := initCommittedRepo(t)
+	installFailingTmuxOnWindow(t, "codex")
+	writeTestRepoConfig(t, repo, testRepoWorkflowConfig+`
+
+[linear]
+api_key_env = "LINEAR_API_KEY"
+`)
+
+	issueUpdateCalls := 0
+	app, _, _ := newTestApp(t)
+	app.linear = newLinearTestOps(t, func(r *http.Request) (*http.Response, error) {
+		payload := readLinearPayload(t, r.Body)
+		query := payload["query"].(string)
+		switch {
+		case strings.Contains(query, "query Issue"):
+			return linearHTTPResponse(t, map[string]any{
+				"data": map[string]any{
+					"issue": map[string]any{
+						"id":         "issue-1",
+						"identifier": "AF-123",
+						"title":      "Fix auth flow",
+						"url":        "https://linear.app/example/issue/AF-123",
+						"team":       map[string]any{"id": "team-1", "key": "AF", "name": "Agentflow"},
+						"state":      map[string]any{"id": "state-1", "name": "Todo", "type": "unstarted"},
+					},
+				},
+			}), nil
+		case strings.Contains(query, "query WorkflowStates"), strings.Contains(query, "mutation IssueUpdate"):
+			issueUpdateCalls++
+			t.Fatal("unexpected Linear transition when codex window creation failed")
+		}
+		t.Fatalf("unexpected query: %s", query)
+		return nil, nil
+	})
+	t.Setenv("LINEAR_API_KEY", "test-token")
+	t.Setenv("AGENTFLOW_STATE_HOME", app.state.root)
+
+	_, err := app.Up(context.Background(), UpOptions{
+		CommonOptions: CommonOptions{RepoPath: repo},
+		Task:          "AF-123",
+	})
+	if err == nil {
+		t.Fatal("expected Up to fail when codex window creation fails")
+	}
+	if issueUpdateCalls != 0 {
+		t.Fatalf("expected no Linear transitions, got %d", issueUpdateCalls)
+	}
+}
+
+func TestReconcileExistingDoesNotTransitionLinearIssueWhenCodexWindowCreationFails(t *testing.T) {
+	repo := initCommittedRepo(t)
+	installFailingTmuxOnWindow(t, "codex")
+	writeTestRepoConfig(t, repo, testRepoWorkflowConfig+`
+
+[linear]
+api_key_env = "LINEAR_API_KEY"
+`)
+
+	ctx := context.Background()
+	exec := Executor{}
+	git := NewGitOps(exec)
+	repoRoot, err := git.RepoRoot(ctx, repo)
+	if err != nil {
+		t.Fatalf("RepoRoot returned error: %v", err)
+	}
+	repoRoot, err = filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks returned error: %v", err)
+	}
+	ref, taskID, err := resolveLinearTask(repoRoot, LinearIssue{
+		ID:         "issue-1",
+		Identifier: "AF-123",
+		Title:      "Fix auth flow",
+		URL:        "https://linear.app/example/issue/AF-123",
+	})
+	if err != nil {
+		t.Fatalf("resolveLinearTask returned error: %v", err)
+	}
+
+	cfg := defaultEffectiveConfig()
+	cfg.Repo.Name = filepath.Base(repo)
+	branch := branchName(cfg, ref, taskID)
+	worktree := filepath.Join(t.TempDir(), ref.Slug+"-"+taskID[:6])
+	if err := git.CreateWorktree(ctx, repo, branch, worktree, "main"); err != nil {
+		t.Fatalf("CreateWorktree returned error: %v", err)
+	}
+
+	issueUpdateCalls := 0
+	app, _, _ := newTestApp(t)
+	app.linear = newLinearTestOps(t, func(r *http.Request) (*http.Response, error) {
+		payload := readLinearPayload(t, r.Body)
+		query := payload["query"].(string)
+		switch {
+		case strings.Contains(query, "query Issue"):
+			return linearHTTPResponse(t, map[string]any{
+				"data": map[string]any{
+					"issue": map[string]any{
+						"id":         "issue-1",
+						"identifier": "AF-123",
+						"title":      "Fix auth flow",
+						"url":        "https://linear.app/example/issue/AF-123",
+						"team":       map[string]any{"id": "team-1", "key": "AF", "name": "Agentflow"},
+						"state":      map[string]any{"id": "state-1", "name": "In Review", "type": "started"},
+					},
+				},
+			}), nil
+		case strings.Contains(query, "query WorkflowStates"), strings.Contains(query, "mutation IssueUpdate"):
+			issueUpdateCalls++
+			t.Fatal("unexpected Linear transition when codex window creation failed")
+		}
+		t.Fatalf("unexpected query: %s", query)
+		return nil, nil
+	})
+	t.Setenv("LINEAR_API_KEY", "test-token")
+
+	runtime, err := app.loadRuntime(ctx, repo)
+	if err != nil {
+		t.Fatalf("loadRuntime returned error: %v", err)
+	}
+	now := time.Now().UTC()
+	state := TaskState{
+		TaskID:       taskID,
+		TaskRef:      ref,
+		Status:       StatusReady,
+		RepoRoot:     repoRoot,
+		RepoID:       repoID(repoRoot),
+		WorktreePath: worktree,
+		Branch:       branch,
+		BaseBranch:   "main",
+		Surface:      runtime.EffectiveConfig.Repo.DefaultSurface,
+		TmuxSession:  renderSessionName(runtime.EffectiveConfig, ref, taskID),
+		Delivery: TaskDeliveryState{
+			State: DeliveryStateMerged,
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	_, err = app.reconcileExisting(ctx, runtime, state)
+	if err == nil {
+		t.Fatal("expected reconcileExisting to fail when codex window creation fails")
+	}
+	if issueUpdateCalls != 0 {
+		t.Fatalf("expected no Linear transitions, got %d", issueUpdateCalls)
+	}
+}
+
 func TestUpSavesStateBeforeCreatingWorktree(t *testing.T) {
 	repo := initCommittedRepo(t)
 	installFakeTmux(t)
@@ -757,6 +1244,87 @@ func installFakeTmux(t *testing.T) {
 	content := "#!/bin/sh\ncase \"$1\" in\n  has-session)\n    exit 1\n    ;;\n  kill-session)\n    exit 0\n    ;;\n  *)\n    exit 0\n    ;;\nesac\n"
 	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
 		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func installFailingTmuxOnNewSession(t *testing.T) {
+	t.Helper()
+
+	binDir := t.TempDir()
+	script := filepath.Join(binDir, "tmux")
+	content := "#!/bin/sh\ncase \"$1\" in\n  has-session)\n    exit 1\n    ;;\n  new-session)\n    echo \"tmux startup failed\" >&2\n    exit 1\n    ;;\n  *)\n    exit 0\n    ;;\nesac\n"
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatalf("write failing tmux: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func installRecordingTmux(t *testing.T, logPath string) {
+	t.Helper()
+
+	binDir := t.TempDir()
+	script := filepath.Join(binDir, "tmux")
+	content := fmt.Sprintf(`#!/bin/sh
+{
+  printf 'cmd:'
+  for arg in "$@"; do
+    printf ' %%s' "$arg"
+  done
+  printf '\n'
+} >> %s
+case "$1" in
+  has-session)
+    exit 1
+    ;;
+  list-windows)
+    exit 0
+    ;;
+  display-message)
+    exit 1
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, shellQuote(logPath))
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatalf("write recording tmux: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func installFailingTmuxOnWindow(t *testing.T, windowName string) {
+	t.Helper()
+
+	binDir := t.TempDir()
+	script := filepath.Join(binDir, "tmux")
+	content := fmt.Sprintf(`#!/bin/sh
+case "$1" in
+  has-session)
+    exit 1
+    ;;
+  new-window)
+    shift
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "-n" ]; then
+        shift
+        if [ "$1" = %s ]; then
+          echo "tmux window failed" >&2
+          exit 1
+        fi
+      fi
+      shift
+    done
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, shellQuote(windowName))
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatalf("write failing tmux window helper: %v", err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }

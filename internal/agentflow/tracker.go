@@ -51,6 +51,25 @@ func (a *App) startLinearIssueIfNeeded(ctx context.Context, runtime RuntimeConfi
 	return nil
 }
 
+func (a *App) refreshLinearIssueSnapshot(ctx context.Context, runtime RuntimeConfig, state *TaskState) error {
+	if !isLinearTask(*state) || !linearConfigured(runtime.EffectiveConfig.Linear) {
+		return nil
+	}
+	apiKey, ok, err := a.resolveOptionalLinearCredential(runtime.EffectiveConfig.Linear)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	issue, err := a.fetchLinearIssue(ctx, runtime, *state, apiKey)
+	if err != nil || issue == nil {
+		return err
+	}
+	a.applyLinearIssue(state, *issue)
+	return nil
+}
+
 func (a *App) resolveOptionalLinearCredential(cfg LinearConfig) (string, bool, error) {
 	apiKey, status, err := a.resolveLinearCredential(cfg)
 	if err != nil {
@@ -162,4 +181,5 @@ func (a *App) applyLinearIssue(state *TaskState, issue LinearIssue) {
 		}
 	}
 	state.IssueState = strings.TrimSpace(issue.State.Name)
+	state.IssueContext = &issue.Context
 }

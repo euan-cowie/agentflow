@@ -27,6 +27,7 @@ type LinearIssue struct {
 	UpdatedAt  time.Time
 	Team       LinearTeam
 	State      LinearWorkflowState
+	Context    LinearIssueContext
 }
 
 type LinearTeam struct {
@@ -39,6 +40,10 @@ type LinearWorkflowState struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 	Type string `json:"type"`
+}
+
+type linearCommentAuthor struct {
+	Name string `json:"name"`
 }
 
 type linearGraphQLResponse[T any] struct {
@@ -201,8 +206,41 @@ mutation IssueUpdate($id: String!, $stateId: String!) {
       identifier
       title
       url
+      updatedAt
+      description
       team { id key name }
       state { id name type }
+      labels(first: 20) {
+        nodes {
+          name
+        }
+      }
+      comments(first: 50) {
+        pageInfo {
+          hasNextPage
+        }
+        nodes {
+          id
+          body
+          createdAt
+          url
+          user { name }
+          parent { id }
+        }
+      }
+      attachments(first: 20) {
+        pageInfo {
+          hasNextPage
+        }
+        nodes {
+          id
+          title
+          subtitle
+          url
+          sourceType
+          createdAt
+        }
+      }
     }
   }
 }
@@ -388,16 +426,111 @@ func linearIssuesFromNodes(nodes []linearIssueNode, sortMode string) []LinearIss
 }
 
 type linearIssueNode struct {
-	ID         string              `json:"id"`
-	Identifier string              `json:"identifier"`
-	Title      string              `json:"title"`
-	URL        string              `json:"url"`
-	UpdatedAt  time.Time           `json:"updatedAt"`
-	Team       LinearTeam          `json:"team"`
-	State      LinearWorkflowState `json:"state"`
+	ID          string              `json:"id"`
+	Identifier  string              `json:"identifier"`
+	Title       string              `json:"title"`
+	URL         string              `json:"url"`
+	UpdatedAt   time.Time           `json:"updatedAt"`
+	Team        LinearTeam          `json:"team"`
+	State       LinearWorkflowState `json:"state"`
+	Description string              `json:"description"`
+	Labels      struct {
+		Nodes []struct {
+			Name string `json:"name"`
+		} `json:"nodes"`
+	} `json:"labels"`
+	Comments struct {
+		PageInfo struct {
+			HasNextPage bool `json:"hasNextPage"`
+		} `json:"pageInfo"`
+		Nodes []struct {
+			ID        string               `json:"id"`
+			Body      string               `json:"body"`
+			URL       string               `json:"url"`
+			CreatedAt time.Time            `json:"createdAt"`
+			User      *linearCommentAuthor `json:"user"`
+			Parent    *struct {
+				ID string `json:"id"`
+			} `json:"parent"`
+		} `json:"nodes"`
+	} `json:"comments"`
+	Attachments struct {
+		PageInfo struct {
+			HasNextPage bool `json:"hasNextPage"`
+		} `json:"pageInfo"`
+		Nodes []struct {
+			ID         string    `json:"id"`
+			Title      string    `json:"title"`
+			Subtitle   string    `json:"subtitle"`
+			URL        string    `json:"url"`
+			SourceType string    `json:"sourceType"`
+			CreatedAt  time.Time `json:"createdAt"`
+		} `json:"nodes"`
+	} `json:"attachments"`
 }
 
 func (n linearIssueNode) toIssue() LinearIssue {
+	labels := make([]string, 0, len(n.Labels.Nodes))
+	for _, label := range n.Labels.Nodes {
+		name := strings.TrimSpace(label.Name)
+		if name != "" {
+			labels = append(labels, name)
+		}
+	}
+	slices.Sort(labels)
+
+	comments := make([]LinearIssueComment, 0, len(n.Comments.Nodes))
+	for _, comment := range n.Comments.Nodes {
+		if comment.Parent != nil {
+			continue
+		}
+		body := strings.TrimSpace(comment.Body)
+		if body == "" {
+			continue
+		}
+		author := ""
+		if comment.User != nil {
+			author = strings.TrimSpace(comment.User.Name)
+		}
+		comments = append(comments, LinearIssueComment{
+			ID:        strings.TrimSpace(comment.ID),
+			Author:    author,
+			Body:      body,
+			URL:       strings.TrimSpace(comment.URL),
+			CreatedAt: comment.CreatedAt,
+		})
+	}
+	slices.SortFunc(comments, func(a, b LinearIssueComment) int {
+		if !a.CreatedAt.Equal(b.CreatedAt) {
+			if a.CreatedAt.Before(b.CreatedAt) {
+				return -1
+			}
+			return 1
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+
+	attachments := make([]LinearIssueAttachment, 0, len(n.Attachments.Nodes))
+	for _, attachment := range n.Attachments.Nodes {
+		attachments = append(attachments, LinearIssueAttachment{
+			ID:         strings.TrimSpace(attachment.ID),
+			Title:      strings.TrimSpace(attachment.Title),
+			Subtitle:   strings.TrimSpace(attachment.Subtitle),
+			URL:        strings.TrimSpace(attachment.URL),
+			SourceType: strings.TrimSpace(attachment.SourceType),
+			CreatedAt:  attachment.CreatedAt,
+		})
+	}
+	slices.SortFunc(attachments, func(a, b LinearIssueAttachment) int {
+		if !a.CreatedAt.Equal(b.CreatedAt) {
+			if a.CreatedAt.Before(b.CreatedAt) {
+				return -1
+			}
+			return 1
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+
 	return LinearIssue{
 		ID:         strings.TrimSpace(n.ID),
 		Identifier: strings.TrimSpace(n.Identifier),
@@ -406,6 +539,16 @@ func (n linearIssueNode) toIssue() LinearIssue {
 		UpdatedAt:  n.UpdatedAt,
 		Team:       n.Team,
 		State:      n.State,
+		Context: LinearIssueContext{
+			TeamName:           strings.TrimSpace(n.Team.Name),
+			TeamKey:            strings.TrimSpace(n.Team.Key),
+			Description:        strings.TrimSpace(n.Description),
+			Labels:             labels,
+			Comments:           comments,
+			HasMoreComments:    n.Comments.PageInfo.HasNextPage,
+			Attachments:        attachments,
+			HasMoreAttachments: n.Attachments.PageInfo.HasNextPage,
+		},
 	}
 }
 
@@ -443,8 +586,41 @@ query Issue($id: String!) {
     identifier
     title
     url
+    updatedAt
+    description
     team { id key name }
     state { id name type }
+    labels(first: 20) {
+      nodes {
+        name
+      }
+    }
+    comments(first: 50) {
+      pageInfo {
+        hasNextPage
+      }
+      nodes {
+        id
+        body
+        createdAt
+        url
+        user { name }
+        parent { id }
+      }
+    }
+    attachments(first: 20) {
+      pageInfo {
+        hasNextPage
+      }
+      nodes {
+        id
+        title
+        subtitle
+        url
+        sourceType
+        createdAt
+      }
+    }
   }
 }
 `

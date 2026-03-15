@@ -188,6 +188,7 @@ func (a *App) Up(ctx context.Context, opts UpOptions) (TaskSummary, error) {
 	if err != nil {
 		return TaskSummary{}, err
 	}
+	var initialLinearIssue *LinearIssue
 
 	if existing, err := a.state.Load(runtime.RepoID, taskID); err == nil {
 		if isLinearTask(existing) && strings.EqualFold(ref.Source, taskSourceLinear) {
@@ -231,6 +232,7 @@ func (a *App) Up(ctx context.Context, opts UpOptions) (TaskSummary, error) {
 		if err != nil {
 			return TaskSummary{}, err
 		}
+		initialLinearIssue = issue
 	}
 
 	surface := opts.Surface
@@ -259,6 +261,9 @@ func (a *App) Up(ctx context.Context, opts UpOptions) (TaskSummary, error) {
 	}
 	if agentWindow := primaryAgentWindow(runtime.EffectiveConfig); agentWindow != nil {
 		state.PrimaryAgentWindow = agentWindow.Name
+	}
+	if initialLinearIssue != nil {
+		a.applyLinearIssue(&state, *initialLinearIssue)
 	}
 
 	worktreeRoot, err := resolveWorktreeRoot(runtime)
@@ -315,7 +320,7 @@ func (a *App) Up(ctx context.Context, opts UpOptions) (TaskSummary, error) {
 		return a.failState(state, err)
 	}
 
-	if err := a.ensureTmux(ctx, runtime, state, true); err != nil {
+	if err := a.ensureTmux(ctx, runtime, &state, true); err != nil {
 		return a.failState(state, err)
 	}
 	if err := a.startLinearIssueIfNeeded(ctx, runtime, &state); err != nil {
@@ -340,7 +345,7 @@ func (a *App) reconcileExisting(ctx context.Context, runtime RuntimeConfig, stat
 	if err := syncManagedEnvFiles(state); err != nil {
 		return a.failState(state, err)
 	}
-	if err := a.ensureTmux(ctx, runtime, state, false); err != nil {
+	if err := a.ensureTmux(ctx, runtime, &state, false); err != nil {
 		return a.failState(state, err)
 	}
 	if err := a.reconcileLinearTask(ctx, runtime, &state); err != nil {
@@ -366,7 +371,7 @@ func (a *App) Attach(ctx context.Context, opts CommonOptions, task string) (Task
 	if err != nil {
 		return TaskSummary{}, err
 	}
-	if err := a.ensureTmux(ctx, runtime, state, false); err != nil {
+	if err := a.ensureTmux(ctx, runtime, &state, false); err != nil {
 		return TaskSummary{}, err
 	}
 	if err := a.tmux.Attach(ctx, state.TmuxSession); err != nil {
@@ -384,7 +389,7 @@ func (a *App) Codex(ctx context.Context, opts CommonOptions, task string) (TaskS
 	if err != nil {
 		return TaskSummary{}, err
 	}
-	if err := a.ensureTmux(ctx, runtime, state, false); err != nil {
+	if err := a.ensureTmux(ctx, runtime, &state, false); err != nil {
 		return TaskSummary{}, err
 	}
 	if state.PrimaryAgentWindow == "" {
@@ -603,7 +608,7 @@ func (a *App) Repair(ctx context.Context, opts CommonOptions, task string) (Task
 		return a.failState(state, err)
 	}
 
-	if err := a.ensureTmux(ctx, runtime, state, false); err != nil {
+	if err := a.ensureTmux(ctx, runtime, &state, false); err != nil {
 		return a.failState(state, err)
 	}
 	if err := a.reconcileLinearTask(ctx, runtime, &state); err != nil {
@@ -897,8 +902,8 @@ func (a *App) runBootstrap(ctx context.Context, runtime RuntimeConfig, state Tas
 	return nil
 }
 
-func (a *App) ensureTmux(ctx context.Context, runtime RuntimeConfig, state TaskState, firstCreate bool) error {
-	if err := a.git.ValidateTaskWorktree(ctx, state); err != nil {
+func (a *App) ensureTmux(ctx context.Context, runtime RuntimeConfig, state *TaskState, firstCreate bool) error {
+	if err := a.git.ValidateTaskWorktree(ctx, *state); err != nil {
 		return err
 	}
 	sessionExists := a.tmux.HasSession(ctx, state.TmuxSession)
@@ -920,13 +925,20 @@ func (a *App) ensureTmux(ctx context.Context, runtime RuntimeConfig, state TaskS
 	}
 	if needCreate {
 		entries := workflowTrustEntries(runtime.Config)
-		if _, err := a.trust.EnsureTrusted(runtime.RepoID, runtime.RepoRoot, runtime.ConfigPath, runtime.WorkflowFingerprint, entries, a.stdin, a.stdout); err != nil {
+		trusted, err := a.trust.EnsureTrusted(runtime.RepoID, runtime.RepoRoot, runtime.ConfigPath, runtime.WorkflowFingerprint, entries, a.stdin, a.stdout)
+		if err != nil {
 			return err
+		}
+		runtime.Trusted = trusted
+	}
+	if needCreate {
+		if err := a.refreshLinearIssueSnapshotForTmux(ctx, runtime, state, firstCreate); err != nil {
+			fmt.Fprintf(a.stderr, "Warning: continuing without refreshed Linear context for %q: %v\n", state.TaskRef.Title, err)
 		}
 	}
 
 	for idx, window := range windows {
-		command, err := a.windowCommand(runtime.EffectiveConfig, state, window, sessionExists && a.tmux.WindowExists(ctx, state.TmuxSession, window.Name))
+		command, err := a.windowCommand(runtime.EffectiveConfig, *state, window, sessionExists && a.tmux.WindowExists(ctx, state.TmuxSession, window.Name))
 		if err != nil {
 			return err
 		}
@@ -957,6 +969,26 @@ func (a *App) ensureTmux(ctx context.Context, runtime RuntimeConfig, state TaskS
 	return nil
 }
 
+func (a *App) refreshLinearIssueSnapshotForTmux(ctx context.Context, runtime RuntimeConfig, state *TaskState, firstCreate bool) error {
+	if !runtime.Trusted || !linearConfigured(runtime.EffectiveConfig.Linear) || !isLinearTask(*state) {
+		return nil
+	}
+	if firstCreate && state.IssueContext != nil {
+		return nil
+	}
+	before := *state
+	if err := a.refreshLinearIssueSnapshot(ctx, runtime, state); err != nil {
+		return err
+	}
+	if linearTaskSnapshotChanged(before, *state) {
+		state.UpdatedAt = a.now()
+		if err := a.state.Save(*state); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (a *App) windowCommand(cfg EffectiveConfig, state TaskState, window TmuxWindowConfig, exists bool) (string, error) {
 	if window.Command != "" {
 		return shellCommandWithEnv(window.Command, taskEnv(state)), nil
@@ -969,7 +1001,7 @@ func (a *App) windowCommand(cfg EffectiveConfig, state TaskState, window TmuxWin
 	if exists && agent.ResumePrompt != "" {
 		prompt = agent.ResumePrompt
 	}
-	contextPrompt := fmt.Sprintf("%s\nTask: %s\nTask ID: %s\nWorktree: %s", prompt, state.TaskRef.Title, state.TaskID, state.WorktreePath)
+	contextPrompt := buildAgentContextPrompt(prompt, state)
 	command, err := a.runner.commandString(agent, state.WorktreePath, contextPrompt, exists)
 	if err != nil {
 		return "", err
