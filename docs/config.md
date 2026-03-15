@@ -185,7 +185,11 @@ Behavior:
 Current supported values:
 
 - `merge_method`: `auto`, `squash`, `merge`, or `rebase`
-- `merge_method = "auto"` currently resolves to GitHub's regular merge mode when agentflow must choose a concrete strategy
+- `merge_method = "auto"` is GitHub-policy-aware:
+  it omits strategy flags when the base branch requires a merge queue,
+  prefers `squash` or `rebase` when linear history is required,
+  and otherwise falls back to a regular merge when that is allowed
+- explicit `merge_method` values fail fast if the base branch policy disallows them
 
 ### `[linear]`
 
@@ -236,6 +240,8 @@ Fields:
 - `mcp_servers`
 
 These affect doctor output but do not change trust or config drift behavior.
+
+When GitHub delivery is enabled, `agentflow doctor` also reports the detected base-branch merge policy and warns when merge-queue repos need CI coverage for `merge_group` or `gh-readonly-queue/*` refs.
 
 ## Trust And Drift
 

@@ -38,6 +38,35 @@ type PullRequestCheck struct {
 	State string `json:"state"`
 }
 
+type GitHubMergePolicy struct {
+	MergeCommitAllowed    bool
+	RebaseMergeAllowed    bool
+	SquashMergeAllowed    bool
+	RequiresLinearHistory bool
+	RequiresMergeQueue    bool
+}
+
+type GitHubMergeOptions struct {
+	Method string
+	Auto   bool
+}
+
+type gitHubRepositoryPolicyResponse struct {
+	Data struct {
+		Repository struct {
+			MergeCommitAllowed bool `json:"mergeCommitAllowed"`
+			RebaseMergeAllowed bool `json:"rebaseMergeAllowed"`
+			SquashMergeAllowed bool `json:"squashMergeAllowed"`
+			Ref                *struct {
+				BranchProtectionRule *struct {
+					RequiresLinearHistory bool `json:"requiresLinearHistory"`
+					RequiresMergeQueue    bool `json:"requiresMergeQueue"`
+				} `json:"branchProtectionRule"`
+			} `json:"ref"`
+		} `json:"repository"`
+	} `json:"data"`
+}
+
 func NewGitHubOps(exec Executor) GitHubOps {
 	return GitHubOps{exec: exec}
 }
@@ -124,25 +153,74 @@ func (g GitHubOps) ReadyPullRequest(ctx context.Context, cwd, selector string) e
 	return err
 }
 
-func (g GitHubOps) MergePullRequest(ctx context.Context, cwd, selector, headSHA, mergeMethod string, auto bool) error {
+func (g GitHubOps) MergePullRequest(ctx context.Context, cwd, selector, headSHA string, opts GitHubMergeOptions) error {
 	args := []string{"pr", "merge", selector, "--match-head-commit", headSHA}
-	if auto {
+	if opts.Auto {
 		args = append(args, "--auto")
 	}
-	switch mergeMethod {
-	case "", "auto":
+	switch opts.Method {
+	case "":
+	case "auto":
+		args = append(args, "--merge")
+	case "merge":
 		args = append(args, "--merge")
 	case "squash":
 		args = append(args, "--squash")
-	case "merge":
-		args = append(args, "--merge")
 	case "rebase":
 		args = append(args, "--rebase")
 	default:
-		return fmt.Errorf("unsupported GitHub merge method %q", mergeMethod)
+		return fmt.Errorf("unsupported GitHub merge method %q", opts.Method)
 	}
 	_, err := g.exec.Run(ctx, cwd, nil, "gh", args...)
 	return err
+}
+
+func (g GitHubOps) RepositoryMergePolicy(ctx context.Context, cwd, owner, repo, baseBranch string) (GitHubMergePolicy, error) {
+	query := `
+query($owner: String!, $name: String!, $qualifiedName: String!) {
+  repository(owner: $owner, name: $name) {
+    mergeCommitAllowed
+    rebaseMergeAllowed
+    squashMergeAllowed
+    ref(qualifiedName: $qualifiedName) {
+      branchProtectionRule {
+        requiresLinearHistory
+        requiresMergeQueue
+      }
+    }
+  }
+}`
+	result, err := g.exec.Run(
+		ctx,
+		cwd,
+		nil,
+		"gh",
+		"api",
+		"graphql",
+		"-f", "query="+query,
+		"-F", "owner="+owner,
+		"-F", "name="+repo,
+		"-F", "qualifiedName=refs/heads/"+baseBranch,
+	)
+	if err != nil {
+		return GitHubMergePolicy{}, err
+	}
+
+	var response gitHubRepositoryPolicyResponse
+	if err := json.Unmarshal([]byte(result.Stdout), &response); err != nil {
+		return GitHubMergePolicy{}, err
+	}
+
+	policy := GitHubMergePolicy{
+		MergeCommitAllowed: response.Data.Repository.MergeCommitAllowed,
+		RebaseMergeAllowed: response.Data.Repository.RebaseMergeAllowed,
+		SquashMergeAllowed: response.Data.Repository.SquashMergeAllowed,
+	}
+	if response.Data.Repository.Ref != nil && response.Data.Repository.Ref.BranchProtectionRule != nil {
+		policy.RequiresLinearHistory = response.Data.Repository.Ref.BranchProtectionRule.RequiresLinearHistory
+		policy.RequiresMergeQueue = response.Data.Repository.Ref.BranchProtectionRule.RequiresMergeQueue
+	}
+	return policy, nil
 }
 
 func (g GitHubOps) RequiredChecksState(ctx context.Context, cwd, selector string) (string, error) {

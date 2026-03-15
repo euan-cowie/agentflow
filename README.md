@@ -165,7 +165,7 @@ The delivery layer sits on top of the existing task lifecycle:
 2. `agentflow status [task]` shows local branch health plus PR/check state when GitHub integration is enabled.
 3. `agentflow sync <task>` fetches the configured remote and rebases or merges the task branch onto the configured base branch.
 4. `agentflow submit <task>` pushes the task branch, creates or reuses a PR when `[github].enabled = true`, and links the PR back to Linear for issue-backed tasks.
-5. `agentflow land <task>` runs preflight commands, syncs the branch, pushes it, enables merge through `gh`, and marks the linked Linear issue complete once agentflow observes the merge.
+5. `agentflow land <task>` runs preflight commands, syncs the branch, pushes it, picks a GitHub-compatible merge strategy when `github.merge_method = "auto"`, defers to merge queue requirements when necessary, and marks the linked Linear issue complete once agentflow observes the merge.
 6. `agentflow gc [task]` removes merged task worktrees, tmux sessions, and local branches.
 
 GitHub automation is optional. If `[github].enabled` is omitted or false, `submit` still pushes the branch but `land` will refuse to continue.
@@ -183,7 +183,9 @@ When `[linear]` is configured, running `agentflow up` without a task opens a ful
 - `env.targets` declares the agentflow-managed env files for the task, and `ports.bindings` attaches generated ports to those targets.
 - `[delivery]` configures branch sync, preflight, and async cleanup behavior.
 - `[github]` enables optional `gh` integration for PR creation, checks, and merge automation.
+- `github.merge_method = "auto"` is GitHub-policy-aware: it prefers queue-compatible behavior first, then a linear-history-safe method when required, and otherwise falls back to regular merge.
 - `[linear]` enables optional Linear issue selection plus started/completed state sync for issue-backed tasks.
 - `agentflow auth linear login` stores a reusable Linear API key locally so repo commands do not require an env var on every shell.
+- `agentflow doctor` reports GitHub merge policy details and warns when merge-queue repos need CI coverage for `merge_group` or `gh-readonly-queue/*` refs.
 - Runtime workflow does not fall back to implicit tmux windows or agent commands; declare them explicitly in `.agentflow/config.toml`.
 - Repo-local Codex guidance for CLI/docs sync lives in [AGENTS.md](/Users/euan-cowie/Projects/agentflow/AGENTS.md) and [.agentflow/skills/cli-doc-sync/SKILL.md](/Users/euan-cowie/Projects/agentflow/.agentflow/skills/cli-doc-sync/SKILL.md).

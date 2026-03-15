@@ -681,6 +681,44 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) ([]DoctorCheck, er
 				OK:      authErr == nil,
 				Details: "gh auth status",
 			})
+			if authErr == nil {
+				state := TaskState{
+					BaseBranch: runtime.EffectiveConfig.Repo.BaseBranch,
+					Delivery: TaskDeliveryState{
+						Remote: strings.TrimSpace(runtime.EffectiveConfig.Delivery.Remote),
+					},
+				}
+				slug := a.baseRepositoryIdentity(ctx, runtime, state)
+				owner, repo, ok := splitRepositorySlug(slug)
+				if !ok {
+					checks = append(checks, DoctorCheck{
+						Name:    "github-merge-policy",
+						OK:      false,
+						Details: "could not determine GitHub repository for the configured base branch",
+					})
+				} else {
+					policy, err := a.gh.RepositoryMergePolicy(ctx, runtime.RepoRoot, owner, repo, githubBaseBranchName(ctx, a.git, runtime, state))
+					checks = append(checks, DoctorCheck{
+						Name:    "github-merge-policy",
+						OK:      err == nil,
+						Details: describeGitHubMergePolicy(policy),
+					})
+					if err != nil {
+						checks[len(checks)-1].Details = err.Error()
+					}
+					if err == nil {
+						details := "merge queue not required"
+						if policy.RequiresMergeQueue {
+							details = "base branch requires merge queue; ensure CI runs for merge_group or gh-readonly-queue/* refs"
+						}
+						checks = append(checks, DoctorCheck{
+							Name:    "advice:merge-queue",
+							OK:      true,
+							Details: details,
+						})
+					}
+				}
+			}
 		}
 
 		for _, server := range runtime.Config.Requirements.MCPServers {

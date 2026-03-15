@@ -238,7 +238,11 @@ func (a *App) Land(ctx context.Context, opts LandOptions) (TaskSummary, error) {
 	if err != nil {
 		return a.failState(state, err)
 	}
-	if err := a.gh.MergePullRequest(ctx, state.WorktreePath, fmt.Sprintf("%d", pr.Number), headSHA, runtime.EffectiveConfig.GitHub.MergeMethod, runtime.EffectiveConfig.GitHub.AutoMerge); err != nil {
+	mergeOpts, err := a.resolveGitHubMergeOptions(ctx, runtime, state)
+	if err != nil {
+		return a.failState(state, err)
+	}
+	if err := a.gh.MergePullRequest(ctx, state.WorktreePath, fmt.Sprintf("%d", pr.Number), headSHA, mergeOpts); err != nil {
 		return a.failState(state, err)
 	}
 
@@ -524,20 +528,22 @@ func (a *App) syncTaskState(ctx context.Context, runtime RuntimeConfig, state Ta
 	}
 
 	rewrote := false
+	operation := effectiveSyncStrategy(runtime.EffectiveConfig)
 	if behind > 0 {
-		switch effectiveSyncStrategy(runtime.EffectiveConfig) {
+		switch operation {
 		case "merge":
 			err = a.git.Merge(ctx, state.WorktreePath, baseRef)
 		default:
+			operation = "rebase"
 			err = a.git.Rebase(ctx, state.WorktreePath, baseRef)
 			rewrote = err == nil
 		}
 		if err != nil {
 			state.Delivery.State = DeliveryStateBlocked
-			state.FailureReason = err.Error()
+			state.FailureReason = syncFailureReason(operation, err)
 			state.UpdatedAt = a.now()
 			_ = a.state.Save(state)
-			return state, false, err
+			return state, false, fmt.Errorf("%s", state.FailureReason)
 		}
 	}
 
@@ -670,7 +676,10 @@ func (a *App) ensurePullRequest(ctx context.Context, runtime RuntimeConfig, stat
 
 func (a *App) findCurrentPullRequest(ctx context.Context, runtime RuntimeConfig, state TaskState) (*PullRequest, error) {
 	if state.Delivery.PullRequestNumber > 0 {
-		return a.gh.ViewPullRequest(ctx, state.WorktreePath, fmt.Sprintf("%d", state.Delivery.PullRequestNumber))
+		pr, err := a.gh.ViewPullRequest(ctx, state.WorktreePath, fmt.Sprintf("%d", state.Delivery.PullRequestNumber))
+		if err == nil && pr != nil {
+			return pr, nil
+		}
 	}
 	return a.findBranchPullRequest(ctx, runtime, state)
 }
@@ -701,6 +710,149 @@ func (a *App) currentHeadRepositoryIdentity(ctx context.Context, runtime Runtime
 		return remoteRepositoryIdentity(remote, "")
 	}
 	return remoteRepositoryIdentity(remote, remoteURL)
+}
+
+func (a *App) baseRepositoryIdentity(ctx context.Context, runtime RuntimeConfig, state TaskState) string {
+	baseRemote := a.git.RemoteNameForRef(ctx, runtime.RepoRoot, state.BaseBranch)
+	if baseRemote == "" {
+		baseRemote = strings.TrimSpace(runtime.EffectiveConfig.Delivery.Remote)
+	}
+	if baseRemote == "" {
+		return ""
+	}
+	remoteURL, err := a.git.RemoteURL(ctx, runtime.RepoRoot, baseRemote)
+	if err != nil {
+		return remoteRepositoryIdentity(baseRemote, "")
+	}
+	return remoteRepositoryIdentity(baseRemote, remoteURL)
+}
+
+func (a *App) resolveGitHubMergeOptions(ctx context.Context, runtime RuntimeConfig, state TaskState) (GitHubMergeOptions, error) {
+	method := strings.TrimSpace(runtime.EffectiveConfig.GitHub.MergeMethod)
+	if method == "" {
+		method = "auto"
+	}
+
+	slug := a.baseRepositoryIdentity(ctx, runtime, state)
+	owner, repo, ok := splitRepositorySlug(slug)
+	if !ok {
+		return GitHubMergeOptions{
+			Method: resolveAutoMergeMethod(GitHubMergePolicy{}),
+			Auto:   runtime.EffectiveConfig.GitHub.AutoMerge,
+		}, nil
+	}
+
+	policy, err := a.gh.RepositoryMergePolicy(ctx, state.WorktreePath, owner, repo, githubBaseBranchName(ctx, a.git, runtime, state))
+	if err != nil {
+		return GitHubMergeOptions{}, err
+	}
+
+	resolved, err := resolveConfiguredGitHubMergeMethod(method, policy)
+	if err != nil {
+		return GitHubMergeOptions{}, err
+	}
+	opts := GitHubMergeOptions{Method: resolved, Auto: runtime.EffectiveConfig.GitHub.AutoMerge}
+	if policy.RequiresMergeQueue {
+		opts.Method = ""
+		opts.Auto = false
+	}
+	return opts, nil
+}
+
+func resolveConfiguredGitHubMergeMethod(configured string, policy GitHubMergePolicy) (string, error) {
+	configured = strings.TrimSpace(configured)
+	if configured == "" {
+		configured = "auto"
+	}
+	switch configured {
+	case "auto":
+		resolved := resolveAutoMergeMethod(policy)
+		if resolved == "" && !policy.RequiresMergeQueue {
+			return "", fmt.Errorf("github.merge_method=%q could not be resolved from the GitHub merge policy for the base branch", configured)
+		}
+		return resolved, nil
+	case "merge", "squash", "rebase":
+		if !gitHubMergeMethodAllowed(configured, policy) {
+			return "", fmt.Errorf("github.merge_method=%q is not allowed by the GitHub merge policy for the base branch", configured)
+		}
+		return configured, nil
+	default:
+		return "", fmt.Errorf("unsupported GitHub merge method %q", configured)
+	}
+}
+
+func resolveAutoMergeMethod(policy GitHubMergePolicy) string {
+	if policy.RequiresMergeQueue {
+		return ""
+	}
+	if policy.RequiresLinearHistory {
+		switch {
+		case policy.SquashMergeAllowed:
+			return "squash"
+		case policy.RebaseMergeAllowed:
+			return "rebase"
+		}
+	}
+	switch {
+	case policy.MergeCommitAllowed || mergePolicyIsZero(policy):
+		return "merge"
+	case policy.SquashMergeAllowed:
+		return "squash"
+	case policy.RebaseMergeAllowed:
+		return "rebase"
+	default:
+		return ""
+	}
+}
+
+func mergePolicyIsZero(policy GitHubMergePolicy) bool {
+	return !policy.MergeCommitAllowed &&
+		!policy.RebaseMergeAllowed &&
+		!policy.SquashMergeAllowed &&
+		!policy.RequiresLinearHistory &&
+		!policy.RequiresMergeQueue
+}
+
+func gitHubMergeMethodAllowed(method string, policy GitHubMergePolicy) bool {
+	if mergePolicyIsZero(policy) {
+		return true
+	}
+	switch method {
+	case "merge":
+		return policy.MergeCommitAllowed
+	case "squash":
+		return policy.SquashMergeAllowed
+	case "rebase":
+		return policy.RebaseMergeAllowed
+	default:
+		return false
+	}
+}
+
+func describeGitHubMergePolicy(policy GitHubMergePolicy) string {
+	methods := make([]string, 0, 3)
+	if mergePolicyIsZero(policy) {
+		methods = append(methods, "merge", "squash", "rebase")
+	} else {
+		if policy.MergeCommitAllowed {
+			methods = append(methods, "merge")
+		}
+		if policy.SquashMergeAllowed {
+			methods = append(methods, "squash")
+		}
+		if policy.RebaseMergeAllowed {
+			methods = append(methods, "rebase")
+		}
+	}
+	return fmt.Sprintf("methods=%s linear_history=%t merge_queue=%t", strings.Join(methods, ","), policy.RequiresLinearHistory, policy.RequiresMergeQueue)
+}
+
+func splitRepositorySlug(slug string) (string, string, bool) {
+	owner, repo, ok := strings.Cut(strings.TrimSpace(slug), "/")
+	if !ok || owner == "" || repo == "" {
+		return "", "", false
+	}
+	return owner, repo, true
 }
 
 func updateDeliveryFromPullRequest(state *TaskState, pr PullRequest) {
@@ -796,8 +948,8 @@ func (a *App) watchPullRequest(ctx context.Context, cwd string, number int) (Pul
 }
 
 func (a *App) isTaskMerged(ctx context.Context, runtime RuntimeConfig, state TaskState) (bool, TaskState, error) {
-	if runtime.EffectiveConfig.GitHub.Enabled && state.Delivery.PullRequestNumber > 0 {
-		pr, err := a.gh.ViewPullRequest(ctx, state.WorktreePath, fmt.Sprintf("%d", state.Delivery.PullRequestNumber))
+	if runtime.EffectiveConfig.GitHub.Enabled {
+		pr, err := a.findCurrentPullRequest(ctx, runtime, state)
 		if err == nil && pr != nil {
 			updateDeliveryFromPullRequest(&state, *pr)
 			if state.Delivery.State == DeliveryStateMerged {
@@ -824,6 +976,15 @@ func (a *App) isTaskMerged(ctx context.Context, runtime RuntimeConfig, state Tas
 		}
 	}
 	return merged, state, nil
+}
+
+func syncFailureReason(operation string, err error) string {
+	switch operation {
+	case "merge":
+		return fmt.Sprintf("%v; resolve conflicts in the task worktree, then run `git merge --continue` or `git merge --abort` before retrying `agentflow sync`", err)
+	default:
+		return fmt.Sprintf("%v; resolve conflicts in the task worktree, then run `git rebase --continue` or `git rebase --abort` before retrying `agentflow sync`", err)
+	}
 }
 
 func (a *App) summaryForState(state TaskState) TaskSummary {

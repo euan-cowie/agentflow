@@ -356,6 +356,113 @@ func TestSyncRebasesTaskBranch(t *testing.T) {
 	}
 }
 
+func TestSyncMergesTaskBranch(t *testing.T) {
+	repo, _ := initCommittedRepoWithRemote(t)
+	installFakeTmux(t)
+	config := strings.Replace(testRepoWorkflowConfig, `sync_strategy = "rebase"`, `sync_strategy = "merge"`, 1)
+	writeTestRepoConfig(t, repo, config)
+
+	if err := os.WriteFile(filepath.Join(repo, "merge-base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write merge-base file: %v", err)
+	}
+	runGit(t, repo, "add", "merge-base.txt")
+	runGit(t, repo, "commit", "-m", "merge base seed")
+	runGit(t, repo, "push", "origin", "main")
+
+	app, _, _ := newTestApp(t)
+	t.Setenv("AGENTFLOW_STATE_HOME", app.state.root)
+	summary, err := app.Up(context.Background(), UpOptions{
+		CommonOptions: CommonOptions{RepoPath: repo},
+		Task:          "sync merge",
+	})
+	if err != nil {
+		t.Fatalf("Up returned error: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(summary.Worktree, "task-merge.txt"), []byte("task merge\n"), 0o644); err != nil {
+		t.Fatalf("write task-merge file: %v", err)
+	}
+	runGit(t, summary.Worktree, "add", "task-merge.txt")
+	runGit(t, summary.Worktree, "commit", "-m", "task merge commit")
+
+	if err := os.WriteFile(filepath.Join(repo, "base-merge.txt"), []byte("base merge\n"), 0o644); err != nil {
+		t.Fatalf("write base-merge file: %v", err)
+	}
+	runGit(t, repo, "add", "base-merge.txt")
+	runGit(t, repo, "commit", "-m", "base merge commit")
+	runGit(t, repo, "push", "origin", "main")
+
+	if _, err := app.Sync(context.Background(), SyncOptions{
+		CommonOptions: CommonOptions{RepoPath: repo},
+		Task:          "sync merge",
+	}); err != nil {
+		t.Fatalf("Sync returned error: %v", err)
+	}
+
+	head := strings.Fields(strings.TrimSpace(runGitCapture(t, summary.Worktree, "rev-list", "--parents", "-n", "1", "HEAD")))
+	if len(head) != 3 {
+		t.Fatalf("expected merge sync to leave a merge commit, got %v", head)
+	}
+}
+
+func TestSyncConflictPersistsGuidance(t *testing.T) {
+	repo, _ := initCommittedRepoWithRemote(t)
+	installFakeTmux(t)
+	writeTestRepoConfig(t, repo, testRepoWorkflowConfig)
+
+	if err := os.WriteFile(filepath.Join(repo, "conflict.txt"), []byte("original\n"), 0o644); err != nil {
+		t.Fatalf("write original conflict file: %v", err)
+	}
+	runGit(t, repo, "add", "conflict.txt")
+	runGit(t, repo, "commit", "-m", "seed conflict file")
+	runGit(t, repo, "push", "origin", "main")
+
+	app, _, _ := newTestApp(t)
+	t.Setenv("AGENTFLOW_STATE_HOME", app.state.root)
+	summary, err := app.Up(context.Background(), UpOptions{
+		CommonOptions: CommonOptions{RepoPath: repo},
+		Task:          "sync conflict",
+	})
+	if err != nil {
+		t.Fatalf("Up returned error: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(summary.Worktree, "conflict.txt"), []byte("task\n"), 0o644); err != nil {
+		t.Fatalf("write task conflict file: %v", err)
+	}
+	runGit(t, summary.Worktree, "add", "conflict.txt")
+	runGit(t, summary.Worktree, "commit", "-m", "task conflict")
+
+	if err := os.WriteFile(filepath.Join(repo, "conflict.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write base conflict file: %v", err)
+	}
+	runGit(t, repo, "add", "conflict.txt")
+	runGit(t, repo, "commit", "-m", "base conflict")
+	runGit(t, repo, "push", "origin", "main")
+
+	_, err = app.Sync(context.Background(), SyncOptions{
+		CommonOptions: CommonOptions{RepoPath: repo},
+		Task:          "sync conflict",
+	})
+	if err == nil {
+		t.Fatal("expected Sync to report a conflict")
+	}
+	if !strings.Contains(err.Error(), "git rebase --continue") {
+		t.Fatalf("expected sync error to include rebase guidance, got %v", err)
+	}
+
+	loaded, loadErr := app.state.Load(repoID(canonicalPath(repo)), summary.TaskID)
+	if loadErr != nil {
+		t.Fatalf("load state: %v", loadErr)
+	}
+	if loaded.Delivery.State != DeliveryStateBlocked {
+		t.Fatalf("expected blocked delivery state after conflict, got %+v", loaded.Delivery)
+	}
+	if !strings.Contains(loaded.FailureReason, "git rebase --continue") {
+		t.Fatalf("expected persisted failure guidance, got %q", loaded.FailureReason)
+	}
+}
+
 func TestSubmitCreatesDraftPullRequest(t *testing.T) {
 	repo, _ := initCommittedRepoWithRemote(t)
 	installFakeTmux(t)
@@ -702,6 +809,73 @@ func TestGCCleansPRMergedBranchEvenWhenNotMergedLocally(t *testing.T) {
 	}
 	if NewGitOps(Executor{}).RefExists(context.Background(), repo, "refs/heads/"+submitted.Branch) {
 		t.Fatalf("expected local branch %q to be deleted after PR merge cleanup", submitted.Branch)
+	}
+}
+
+func TestGCFindsMergedPullRequestByBranchWhenStateLostPRNumber(t *testing.T) {
+	repo, _ := initCommittedRepoWithRemote(t)
+	installFakeTmux(t)
+	ghStateDir := installFakeGitHubCLI(t)
+	writeTestRepoConfig(t, repo, testRepoGitHubConfig)
+
+	app, _, _ := newTestApp(t)
+	t.Setenv("AGENTFLOW_STATE_HOME", app.state.root)
+	summary, err := app.Up(context.Background(), UpOptions{
+		CommonOptions: CommonOptions{RepoPath: repo},
+		Task:          "gc branch pr lookup",
+	})
+	if err != nil {
+		t.Fatalf("Up returned error: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(summary.Worktree, "gc-branch-pr.txt"), []byte("gc branch pr\n"), 0o644); err != nil {
+		t.Fatalf("write gc-branch-pr file: %v", err)
+	}
+	runGit(t, summary.Worktree, "add", "gc-branch-pr.txt")
+	runGit(t, summary.Worktree, "commit", "-m", "gc branch pr commit")
+
+	submitted, err := app.Submit(context.Background(), SubmitOptions{
+		CommonOptions: CommonOptions{RepoPath: repo},
+		Task:          "gc branch pr lookup",
+	})
+	if err != nil {
+		t.Fatalf("Submit returned error: %v", err)
+	}
+
+	writeFakePullRequestState(t, ghStateDir, fakePullRequestState{
+		Number:     17,
+		URL:        "https://example.com/pr/17",
+		State:      "MERGED",
+		IsDraft:    false,
+		Base:       "main",
+		Head:       submitted.Branch,
+		HeadOID:    runGitCapture(t, summary.Worktree, "rev-parse", "HEAD"),
+		HeadOwner:  "origin",
+		HeadRepo:   "origin",
+		MergeState: "MERGED",
+		MergedAt:   "2026-03-14T00:00:00Z",
+	})
+
+	loaded, err := app.state.Load(repoID(canonicalPath(repo)), submitted.TaskID)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	loaded.Delivery.PullRequestNumber = 0
+	loaded.Delivery.PullRequestURL = ""
+	loaded.Delivery.PullRequestState = ""
+	if err := app.state.Save(loaded); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	results, err := app.GC(context.Background(), GCOptions{
+		CommonOptions: CommonOptions{RepoPath: repo},
+		Task:          "gc branch pr lookup",
+	})
+	if err != nil {
+		t.Fatalf("GC returned error: %v", err)
+	}
+	if len(results) != 1 || results[0].Status != "deleted" {
+		t.Fatalf("expected GC to delete branch-matched merged task, got %+v", results)
 	}
 }
 
@@ -1353,6 +1527,144 @@ func TestLandUsesConcreteMergeFlagForAutoMethod(t *testing.T) {
 	}
 }
 
+func TestLandAutoUsesLinearHistorySafeMethod(t *testing.T) {
+	repo, _ := initCommittedRepoWithRemote(t)
+	installFakeTmux(t)
+	ghStateDir := installFakeGitHubCLI(t)
+	writeFakeGitHubMergePolicy(t, ghStateDir, fakeGitHubMergePolicy{
+		MergeCommitAllowed:    false,
+		RebaseMergeAllowed:    true,
+		SquashMergeAllowed:    true,
+		RequiresLinearHistory: true,
+		RequiresMergeQueue:    false,
+		RulePattern:           "main",
+	})
+	config := strings.Replace(testRepoGitHubConfig, "auto_merge = true", "auto_merge = false", 1)
+	writeTestRepoConfig(t, repo, config)
+
+	app, _, _ := newTestApp(t)
+	t.Setenv("AGENTFLOW_STATE_HOME", app.state.root)
+	summary, err := app.Up(context.Background(), UpOptions{
+		CommonOptions: CommonOptions{RepoPath: repo},
+		Task:          "land linear history",
+	})
+	if err != nil {
+		t.Fatalf("Up returned error: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(summary.Worktree, "land-linear-history.txt"), []byte("land linear history\n"), 0o644); err != nil {
+		t.Fatalf("write land-linear-history file: %v", err)
+	}
+	runGit(t, summary.Worktree, "add", "land-linear-history.txt")
+	runGit(t, summary.Worktree, "commit", "-m", "land linear history commit")
+
+	if _, err := app.Land(context.Background(), LandOptions{
+		CommonOptions: CommonOptions{RepoPath: repo},
+		Task:          "land linear history",
+	}); err != nil {
+		t.Fatalf("Land returned error: %v", err)
+	}
+
+	mergeState := readFakeMergeState(t, ghStateDir)
+	if mergeState.Mode != "squash" {
+		t.Fatalf("expected auto merge_method to prefer squash under linear history, got %+v", mergeState)
+	}
+}
+
+func TestLandOmitsStrategyFlagWhenMergeQueueIsRequired(t *testing.T) {
+	repo, _ := initCommittedRepoWithRemote(t)
+	installFakeTmux(t)
+	ghStateDir := installFakeGitHubCLI(t)
+	writeFakeGitHubMergePolicy(t, ghStateDir, fakeGitHubMergePolicy{
+		MergeCommitAllowed:    true,
+		RebaseMergeAllowed:    true,
+		SquashMergeAllowed:    true,
+		RequiresLinearHistory: false,
+		RequiresMergeQueue:    true,
+		RulePattern:           "main",
+	})
+	config := strings.Replace(testRepoGitHubConfig, "auto_merge = true", "auto_merge = false", 1)
+	writeTestRepoConfig(t, repo, config)
+
+	app, _, _ := newTestApp(t)
+	t.Setenv("AGENTFLOW_STATE_HOME", app.state.root)
+	summary, err := app.Up(context.Background(), UpOptions{
+		CommonOptions: CommonOptions{RepoPath: repo},
+		Task:          "land merge queue",
+	})
+	if err != nil {
+		t.Fatalf("Up returned error: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(summary.Worktree, "land-merge-queue.txt"), []byte("land merge queue\n"), 0o644); err != nil {
+		t.Fatalf("write land-merge-queue file: %v", err)
+	}
+	runGit(t, summary.Worktree, "add", "land-merge-queue.txt")
+	runGit(t, summary.Worktree, "commit", "-m", "land merge queue commit")
+
+	if _, err := app.Land(context.Background(), LandOptions{
+		CommonOptions: CommonOptions{RepoPath: repo},
+		Task:          "land merge queue",
+	}); err != nil {
+		t.Fatalf("Land returned error: %v", err)
+	}
+
+	mergeState := readFakeMergeState(t, ghStateDir)
+	if mergeState.Mode != "" {
+		t.Fatalf("expected merge queue land to omit merge strategy flags, got %+v", mergeState)
+	}
+	if mergeState.Auto {
+		t.Fatalf("expected merge queue land to omit --auto, got %+v", mergeState)
+	}
+}
+
+func TestLandRejectsDisallowedExplicitMergeMethod(t *testing.T) {
+	repo, _ := initCommittedRepoWithRemote(t)
+	installFakeTmux(t)
+	ghStateDir := installFakeGitHubCLI(t)
+	writeFakeGitHubMergePolicy(t, ghStateDir, fakeGitHubMergePolicy{
+		MergeCommitAllowed:    false,
+		RebaseMergeAllowed:    true,
+		SquashMergeAllowed:    true,
+		RequiresLinearHistory: true,
+		RequiresMergeQueue:    false,
+		RulePattern:           "main",
+	})
+	config := strings.Replace(testRepoGitHubConfig, `merge_method = "auto"`, `merge_method = "merge"`, 1)
+	config = strings.Replace(config, "auto_merge = true", "auto_merge = false", 1)
+	writeTestRepoConfig(t, repo, config)
+
+	app, _, _ := newTestApp(t)
+	t.Setenv("AGENTFLOW_STATE_HOME", app.state.root)
+	summary, err := app.Up(context.Background(), UpOptions{
+		CommonOptions: CommonOptions{RepoPath: repo},
+		Task:          "land disallowed merge",
+	})
+	if err != nil {
+		t.Fatalf("Up returned error: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(summary.Worktree, "land-disallowed-merge.txt"), []byte("land disallowed merge\n"), 0o644); err != nil {
+		t.Fatalf("write land-disallowed-merge file: %v", err)
+	}
+	runGit(t, summary.Worktree, "add", "land-disallowed-merge.txt")
+	runGit(t, summary.Worktree, "commit", "-m", "land disallowed merge commit")
+
+	_, err = app.Land(context.Background(), LandOptions{
+		CommonOptions: CommonOptions{RepoPath: repo},
+		Task:          "land disallowed merge",
+	})
+	if err == nil {
+		t.Fatal("expected Land to reject the disallowed merge method")
+	}
+	if !strings.Contains(err.Error(), `github.merge_method="merge" is not allowed`) {
+		t.Fatalf("unexpected land error: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(ghStateDir, "merge.env")); !os.IsNotExist(statErr) {
+		t.Fatalf("expected merge command not to run, stat err=%v", statErr)
+	}
+}
+
 func TestGCFetchesBaseRemoteWhenDifferentFromPushRemote(t *testing.T) {
 	repo, _ := initCommittedRepoWithRemote(t)
 	installFakeTmux(t)
@@ -1411,6 +1723,7 @@ set -eu
 state_dir=%s
 pr_file="$state_dir/pr.env"
 merge_file="$state_dir/merge.env"
+policy_file="$state_dir/policy.env"
 
 load_pr() {
   if [ -f "$pr_file" ]; then
@@ -1446,6 +1759,19 @@ MERGED_AT=$MERGED_AT
 EOF
 }
 
+load_policy() {
+  if [ -f "$policy_file" ]; then
+    . "$policy_file"
+  else
+    MERGE_COMMIT_ALLOWED=true
+    REBASE_MERGE_ALLOWED=true
+    SQUASH_MERGE_ALLOWED=true
+    REQUIRES_LINEAR_HISTORY=false
+    REQUIRES_MERGE_QUEUE=false
+    RULE_PATTERN=main
+  fi
+}
+
 print_pr() {
   merged_at=null
   if [ -n "$MERGED_AT" ]; then
@@ -1463,10 +1789,19 @@ print_pr() {
     "$NUMBER" "$URL" "$STATE" "$IS_DRAFT" "$BASE" "$HEAD" "$HEAD_OID" "$head_repo_owner" "$head_repo" "$MERGE_STATE" "$merged_at"
 }
 
+print_policy() {
+  printf '{"data":{"repository":{"mergeCommitAllowed":%%s,"rebaseMergeAllowed":%%s,"squashMergeAllowed":%%s,"ref":{"branchProtectionRule":{"requiresLinearHistory":%%s,"requiresMergeQueue":%%s}}}}}\n' \
+    "$MERGE_COMMIT_ALLOWED" "$REBASE_MERGE_ALLOWED" "$SQUASH_MERGE_ALLOWED" "$REQUIRES_LINEAR_HISTORY" "$REQUIRES_MERGE_QUEUE"
+}
+
 load_pr
 case "$1 $2" in
   "auth status")
     exit 0
+    ;;
+  "api graphql")
+    load_policy
+    print_policy
     ;;
   "pr list")
     if [ -f "$pr_file" ]; then
@@ -1556,6 +1891,14 @@ esac
 		t.Fatalf("write fake gh: %v", err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	writeFakeGitHubMergePolicy(t, stateDir, fakeGitHubMergePolicy{
+		MergeCommitAllowed:    true,
+		RebaseMergeAllowed:    true,
+		SquashMergeAllowed:    true,
+		RequiresLinearHistory: false,
+		RequiresMergeQueue:    false,
+		RulePattern:           "main",
+	})
 	return stateDir
 }
 
@@ -1576,6 +1919,15 @@ type fakePullRequestState struct {
 type fakeMergeState struct {
 	Mode string
 	Auto bool
+}
+
+type fakeGitHubMergePolicy struct {
+	MergeCommitAllowed    bool
+	RebaseMergeAllowed    bool
+	SquashMergeAllowed    bool
+	RequiresLinearHistory bool
+	RequiresMergeQueue    bool
+	RulePattern           string
 }
 
 func writeFakePullRequestState(t *testing.T, stateDir string, state fakePullRequestState) {
@@ -1658,4 +2010,23 @@ func readFakeMergeState(t *testing.T, stateDir string) fakeMergeState {
 		}
 	}
 	return state
+}
+
+func writeFakeGitHubMergePolicy(t *testing.T, stateDir string, policy fakeGitHubMergePolicy) {
+	t.Helper()
+	if policy.RulePattern == "" {
+		policy.RulePattern = "main"
+	}
+	content := fmt.Sprintf(
+		"MERGE_COMMIT_ALLOWED=%t\nREBASE_MERGE_ALLOWED=%t\nSQUASH_MERGE_ALLOWED=%t\nREQUIRES_LINEAR_HISTORY=%t\nREQUIRES_MERGE_QUEUE=%t\nRULE_PATTERN=%s\n",
+		policy.MergeCommitAllowed,
+		policy.RebaseMergeAllowed,
+		policy.SquashMergeAllowed,
+		policy.RequiresLinearHistory,
+		policy.RequiresMergeQueue,
+		policy.RulePattern,
+	)
+	if err := os.WriteFile(filepath.Join(stateDir, "policy.env"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write fake GitHub merge policy: %v", err)
+	}
 }
