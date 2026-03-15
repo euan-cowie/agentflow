@@ -1,0 +1,19 @@
+Tear down a tracked task worktree and session.
+
+<task> can be a Linear issue key like TGG-132, an explicit source ref like linear:TGG-132 or manual:fix auth flow, or the exact tracked task title.
+
+Usage:
+  agentflow down <task> [flags]
+
+Examples:
+  agentflow down TGG-132
+  agentflow down linear:TGG-132
+  agentflow down "fix auth flow"
+
+Flags:
+      --delete-branch   Delete the branch after teardown if it is merged
+      --force           Discard dirty worktree changes after an explicit confirmation prompt
+  -h, --help            help for down
+
+Global Flags:
+      --repo string   Path inside the repo to operate on

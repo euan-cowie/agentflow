@@ -52,6 +52,7 @@ type GitHubConfig struct {
 type LinearConfig struct {
 	APIKeyEnv         string   `toml:"api_key_env" json:"api_key_env"`
 	CredentialProfile string   `toml:"credential_profile" json:"credential_profile"`
+	IssueSort         string   `toml:"issue_sort" json:"issue_sort"`
 	TeamKeys          []string `toml:"team_keys" json:"team_keys"`
 	PickerScope       string   `toml:"picker_scope" json:"picker_scope"`
 	StartedState      string   `toml:"started_state" json:"started_state"`

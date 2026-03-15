@@ -48,6 +48,7 @@ type DownOptions struct {
 	CommonOptions
 	Task         string
 	DeleteBranch bool
+	Force        bool
 }
 
 type SyncOptions struct {
@@ -482,13 +483,20 @@ func (a *App) Down(ctx context.Context, opts DownOptions) (TaskSummary, error) {
 		fmt.Fprintf(a.stderr, "Resuming teardown for task %q after a previous failed delete\n", state.TaskRef.Title)
 	}
 	worktreeValid := a.git.ValidateTaskWorktree(ctx, state) == nil
+	forceRemoveWorktree := false
 	if worktreeValid {
 		dirty, err := a.git.IsDirtyIgnoring(ctx, state.WorktreePath, state.EffectiveManagedEnvFiles())
 		if err != nil {
 			return TaskSummary{}, err
 		}
 		if dirty {
-			return TaskSummary{}, errors.New("refusing to remove dirty worktree")
+			if !opts.Force {
+				return TaskSummary{}, errors.New("refusing to remove dirty worktree; commit or stash the changes first, or rerun `agentflow down --force` to discard them")
+			}
+			if err := a.confirmForceDown(state); err != nil {
+				return TaskSummary{}, err
+			}
+			forceRemoveWorktree = true
 		}
 		checkedOutElsewhere, err := a.git.BranchCheckedOutElsewhere(ctx, state.RepoRoot, state.Branch, state.WorktreePath)
 		if err != nil {
@@ -514,10 +522,16 @@ func (a *App) Down(ctx context.Context, opts DownOptions) (TaskSummary, error) {
 		}
 	}
 	if worktreeValid {
-		if err := removeManagedEnvFiles(state.WorktreePath, state.EffectiveManagedEnvFiles()); err != nil {
-			return a.failState(state, err)
+		if !forceRemoveWorktree {
+			if err := removeManagedEnvFiles(state.WorktreePath, state.EffectiveManagedEnvFiles()); err != nil {
+				return a.failState(state, err)
+			}
 		}
-		if err := a.git.RemoveWorktree(ctx, state.RepoRoot, state.WorktreePath); err != nil {
+		remove := a.git.RemoveWorktree
+		if forceRemoveWorktree {
+			remove = a.git.RemoveWorktreeForce
+		}
+		if err := remove(ctx, state.RepoRoot, state.WorktreePath); err != nil {
 			return a.failState(state, err)
 		}
 	} else {

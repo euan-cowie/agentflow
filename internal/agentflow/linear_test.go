@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLinearOpsIssueUsesAuthorizationHeader(t *testing.T) {
@@ -42,7 +43,7 @@ func TestLinearOpsIssueUsesAuthorizationHeader(t *testing.T) {
 	}
 }
 
-func TestLinearOpsPickerIssuesAssignedScopeSortsByIdentifier(t *testing.T) {
+func TestLinearOpsPickerIssuesAssignedScopeSortsByStateThenUpdated(t *testing.T) {
 	t.Parallel()
 
 	ops := newLinearTestOps(t, func(r *http.Request) (*http.Response, error) {
@@ -56,6 +57,62 @@ func TestLinearOpsPickerIssuesAssignedScopeSortsByIdentifier(t *testing.T) {
 								"identifier": "AF-200",
 								"title":      "Second",
 								"url":        "https://linear.app/example/issue/AF-200",
+								"updatedAt":  "2026-03-10T10:00:00Z",
+								"team":       map[string]any{"id": "team-1", "key": "AF", "name": "Agentflow"},
+								"state":      map[string]any{"id": "state-2", "name": "In Progress", "type": "started"},
+							},
+							{
+								"id":         "issue-1",
+								"identifier": "AF-100",
+								"title":      "First",
+								"url":        "https://linear.app/example/issue/AF-100",
+								"updatedAt":  "2026-03-15T10:00:00Z",
+								"team":       map[string]any{"id": "team-1", "key": "AF", "name": "Agentflow"},
+								"state":      map[string]any{"id": "state-1", "name": "Todo", "type": "unstarted"},
+							},
+							{
+								"id":         "issue-3",
+								"identifier": "AF-150",
+								"title":      "Third",
+								"url":        "https://linear.app/example/issue/AF-150",
+								"updatedAt":  "2026-03-12T10:00:00Z",
+								"team":       map[string]any{"id": "team-1", "key": "AF", "name": "Agentflow"},
+								"state":      map[string]any{"id": "state-3", "name": "Review", "type": "started"},
+							},
+						},
+					},
+				},
+			},
+		}), nil
+	})
+
+	issues, err := ops.PickerIssues(context.Background(), "test-token", LinearConfig{APIKeyEnv: "LINEAR_API_KEY"})
+	if err != nil {
+		t.Fatalf("PickerIssues returned error: %v", err)
+	}
+	if len(issues) != 3 {
+		t.Fatalf("expected 3 issues, got %d", len(issues))
+	}
+	if issues[0].Identifier != "AF-150" || issues[1].Identifier != "AF-200" || issues[2].Identifier != "AF-100" {
+		t.Fatalf("expected issues to be sorted by state then recent update, got %+v", issues)
+	}
+}
+
+func TestLinearOpsPickerIssuesAssignedScopeHonorsIdentifierSort(t *testing.T) {
+	t.Parallel()
+
+	ops := newLinearTestOps(t, func(r *http.Request) (*http.Response, error) {
+		return linearHTTPResponse(t, map[string]any{
+			"data": map[string]any{
+				"viewer": map[string]any{
+					"assignedIssues": map[string]any{
+						"nodes": []map[string]any{
+							{
+								"id":         "issue-2",
+								"identifier": "AF-200",
+								"title":      "Second",
+								"url":        "https://linear.app/example/issue/AF-200",
+								"updatedAt":  time.Date(2026, 3, 10, 10, 0, 0, 0, time.UTC).Format(time.RFC3339),
 								"team":       map[string]any{"id": "team-1", "key": "AF", "name": "Agentflow"},
 								"state":      map[string]any{"id": "state-1", "name": "Todo", "type": "unstarted"},
 							},
@@ -64,6 +121,7 @@ func TestLinearOpsPickerIssuesAssignedScopeSortsByIdentifier(t *testing.T) {
 								"identifier": "AF-100",
 								"title":      "First",
 								"url":        "https://linear.app/example/issue/AF-100",
+								"updatedAt":  time.Date(2026, 3, 15, 10, 0, 0, 0, time.UTC).Format(time.RFC3339),
 								"team":       map[string]any{"id": "team-1", "key": "AF", "name": "Agentflow"},
 								"state":      map[string]any{"id": "state-2", "name": "In Progress", "type": "started"},
 							},
@@ -74,7 +132,10 @@ func TestLinearOpsPickerIssuesAssignedScopeSortsByIdentifier(t *testing.T) {
 		}), nil
 	})
 
-	issues, err := ops.PickerIssues(context.Background(), "test-token", LinearConfig{APIKeyEnv: "LINEAR_API_KEY"})
+	issues, err := ops.PickerIssues(context.Background(), "test-token", LinearConfig{
+		APIKeyEnv: "LINEAR_API_KEY",
+		IssueSort: "identifier",
+	})
 	if err != nil {
 		t.Fatalf("PickerIssues returned error: %v", err)
 	}
@@ -96,6 +157,9 @@ func TestLinearOpsTransitionIssueAndAttachment(t *testing.T) {
 
 		switch {
 		case strings.Contains(query, "query WorkflowStates"):
+			if !strings.Contains(query, "query WorkflowStates($teamId: ID!)") {
+				t.Fatalf("expected workflow states query to use ID!, got %s", query)
+			}
 			return linearHTTPResponse(t, map[string]any{
 				"data": map[string]any{
 					"workflowStates": map[string]any{

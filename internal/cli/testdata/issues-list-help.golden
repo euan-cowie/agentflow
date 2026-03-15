@@ -1,0 +1,10 @@
+List available issues from the configured tracker
+
+Usage:
+  agentflow issues list [flags]
+
+Flags:
+  -h, --help   help for list
+
+Global Flags:
+      --repo string   Path inside the repo to operate on

@@ -30,6 +30,26 @@ func TestCLIHelpGolden(t *testing.T) {
 			golden: "config-help.golden",
 		},
 		{
+			name:   "issues-help",
+			args:   []string{"issues", "--help"},
+			golden: "issues-help.golden",
+		},
+		{
+			name:   "issues-list-help",
+			args:   []string{"issues", "list", "--help"},
+			golden: "issues-list-help.golden",
+		},
+		{
+			name:   "list-help",
+			args:   []string{"list", "--help"},
+			golden: "list-help.golden",
+		},
+		{
+			name:   "down-help",
+			args:   []string{"down", "--help"},
+			golden: "down-help.golden",
+		},
+		{
 			name:   "auth-help",
 			args:   []string{"auth", "--help"},
 			golden: "auth-help.golden",

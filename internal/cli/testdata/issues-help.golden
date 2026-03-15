@@ -1,0 +1,15 @@
+Inspect available tracker issues
+
+Usage:
+  agentflow issues [command]
+
+Available Commands:
+  list        List available issues from the configured tracker
+
+Flags:
+  -h, --help   help for issues
+
+Global Flags:
+      --repo string   Path inside the repo to operate on
+
+Use "agentflow issues [command] --help" for more information about a command.

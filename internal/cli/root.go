@@ -40,6 +40,7 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(reviewCommand(func() *agentflow.App { return appFor() }, &repoPath))
 	root.AddCommand(downCommand(func() *agentflow.App { return appFor() }, &repoPath))
 	root.AddCommand(listCommand(func() *agentflow.App { return appFor() }, &repoPath))
+	root.AddCommand(issuesCommand(func() *agentflow.App { return appFor() }, &repoPath))
 	root.AddCommand(gcCommand(func() *agentflow.App { return appFor() }, &repoPath))
 	root.AddCommand(doctorCommand(func() *agentflow.App { return appFor() }, &repoPath))
 	root.AddCommand(repairCommand(func() *agentflow.App { return appFor() }, &repoPath))

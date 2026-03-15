@@ -24,6 +24,7 @@ type LinearIssue struct {
 	Identifier string
 	Title      string
 	URL        string
+	UpdatedAt  time.Time
 	Team       LinearTeam
 	State      LinearWorkflowState
 }
@@ -125,6 +126,7 @@ query AssignedIssues($first: Int!) {
         identifier
         title
         url
+        updatedAt
         team { id key name }
         state { id name type }
       }
@@ -135,7 +137,7 @@ query AssignedIssues($first: Int!) {
 		if err != nil {
 			return nil, err
 		}
-		return linearIssuesFromNodes(resp.Viewer.AssignedIssues.Nodes), nil
+		return linearIssuesFromNodes(resp.Viewer.AssignedIssues.Nodes, effectiveLinearIssueSort(cfg)), nil
 	case "team":
 		type responseData struct {
 			Issues struct {
@@ -156,6 +158,7 @@ query TeamIssues($first: Int!, $teamKeys: [String!]!) {
       identifier
       title
       url
+      updatedAt
       team { id key name }
       state { id name type }
     }
@@ -168,7 +171,7 @@ query TeamIssues($first: Int!, $teamKeys: [String!]!) {
 		if err != nil {
 			return nil, err
 		}
-		return linearIssuesFromNodes(resp.Issues.Nodes), nil
+		return linearIssuesFromNodes(resp.Issues.Nodes, effectiveLinearIssueSort(cfg)), nil
 	default:
 		return nil, fmt.Errorf("unsupported Linear picker scope %q", scope)
 	}
@@ -257,7 +260,7 @@ func (l LinearOps) targetWorkflowState(ctx context.Context, apiKey, teamID, stat
 		} `json:"workflowStates"`
 	}
 	resp, err := linearQuery[responseData](ctx, l, apiKey, `
-query WorkflowStates($teamId: String!) {
+query WorkflowStates($teamId: ID!) {
   workflowStates(filter: { team: { id: { eq: $teamId } } }) {
     nodes {
       id
@@ -335,13 +338,51 @@ func linearQuery[T any](ctx context.Context, l LinearOps, apiKey, query string, 
 	return decoded.Data, nil
 }
 
-func linearIssuesFromNodes(nodes []linearIssueNode) []LinearIssue {
+func linearIssuesFromNodes(nodes []linearIssueNode, sortMode string) []LinearIssue {
 	out := make([]LinearIssue, 0, len(nodes))
 	for _, node := range nodes {
 		out = append(out, node.toIssue())
 	}
+	switch sortMode {
+	case "linear":
+		return out
+	case "identifier":
+		slices.SortFunc(out, func(a, b LinearIssue) int {
+			if cmp := strings.Compare(a.Identifier, b.Identifier); cmp != 0 {
+				return cmp
+			}
+			return strings.Compare(a.Title, b.Title)
+		})
+		return out
+	case "updated":
+		slices.SortFunc(out, func(a, b LinearIssue) int {
+			if !a.UpdatedAt.Equal(b.UpdatedAt) {
+				if a.UpdatedAt.After(b.UpdatedAt) {
+					return -1
+				}
+				return 1
+			}
+			if cmp := strings.Compare(a.Identifier, b.Identifier); cmp != 0 {
+				return cmp
+			}
+			return strings.Compare(a.Title, b.Title)
+		})
+		return out
+	}
 	slices.SortFunc(out, func(a, b LinearIssue) int {
-		return strings.Compare(a.Identifier, b.Identifier)
+		if cmp := linearIssueStateRank(a.State.Type) - linearIssueStateRank(b.State.Type); cmp != 0 {
+			return cmp
+		}
+		if !a.UpdatedAt.Equal(b.UpdatedAt) {
+			if a.UpdatedAt.After(b.UpdatedAt) {
+				return -1
+			}
+			return 1
+		}
+		if cmp := strings.Compare(a.Identifier, b.Identifier); cmp != 0 {
+			return cmp
+		}
+		return strings.Compare(a.Title, b.Title)
 	})
 	return out
 }
@@ -351,6 +392,7 @@ type linearIssueNode struct {
 	Identifier string              `json:"identifier"`
 	Title      string              `json:"title"`
 	URL        string              `json:"url"`
+	UpdatedAt  time.Time           `json:"updatedAt"`
 	Team       LinearTeam          `json:"team"`
 	State      LinearWorkflowState `json:"state"`
 }
@@ -361,8 +403,24 @@ func (n linearIssueNode) toIssue() LinearIssue {
 		Identifier: strings.TrimSpace(n.Identifier),
 		Title:      strings.TrimSpace(n.Title),
 		URL:        strings.TrimSpace(n.URL),
+		UpdatedAt:  n.UpdatedAt,
 		Team:       n.Team,
 		State:      n.State,
+	}
+}
+
+func linearIssueStateRank(stateType string) int {
+	switch strings.ToLower(strings.TrimSpace(stateType)) {
+	case "started":
+		return 0
+	case "unstarted":
+		return 1
+	case "completed":
+		return 2
+	case "canceled":
+		return 3
+	default:
+		return 4
 	}
 }
 

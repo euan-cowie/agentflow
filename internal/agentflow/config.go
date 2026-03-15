@@ -102,6 +102,9 @@ func applyConfigFile(base EffectiveConfig, cfg ConfigFile) EffectiveConfig {
 	if cfg.Linear.CredentialProfile != "" {
 		out.Linear.CredentialProfile = cfg.Linear.CredentialProfile
 	}
+	if cfg.Linear.IssueSort != "" {
+		out.Linear.IssueSort = cfg.Linear.IssueSort
+	}
 	if len(cfg.Linear.TeamKeys) > 0 {
 		out.Linear.TeamKeys = append([]string(nil), cfg.Linear.TeamKeys...)
 	}
@@ -337,6 +340,11 @@ func validateEffectiveConfig(cfg EffectiveConfig) error {
 				return fmt.Errorf("linear.credential_profile %w", err)
 			}
 		}
+		switch sortMode := effectiveLinearIssueSort(cfg.Linear); sortMode {
+		case "linear", "identifier", "updated", "state_then_updated":
+		default:
+			return fmt.Errorf("linear.issue_sort must be one of linear, identifier, updated, or state_then_updated")
+		}
 		switch scope := effectiveLinearPickerScope(cfg.Linear); scope {
 		case "assigned", "team":
 		default:
@@ -372,6 +380,13 @@ func effectiveLinearAPIKeyEnv(cfg LinearConfig) string {
 
 func effectiveLinearCredentialProfile(cfg LinearConfig) string {
 	return strings.TrimSpace(cfg.CredentialProfile)
+}
+
+func effectiveLinearIssueSort(cfg LinearConfig) string {
+	if value := strings.TrimSpace(cfg.IssueSort); value != "" {
+		return strings.ToLower(value)
+	}
+	return "state_then_updated"
 }
 
 func effectiveLinearPickerScope(cfg LinearConfig) string {
@@ -581,6 +596,7 @@ type renderBootstrapConfig struct {
 type renderLinearConfig struct {
 	APIKeyEnv         string   `toml:"api_key_env,omitempty" json:"api_key_env,omitempty"`
 	CredentialProfile string   `toml:"credential_profile,omitempty" json:"credential_profile,omitempty"`
+	IssueSort         string   `toml:"issue_sort,omitempty" json:"issue_sort,omitempty"`
 	TeamKeys          []string `toml:"team_keys,omitempty" json:"team_keys,omitempty"`
 	PickerScope       string   `toml:"picker_scope,omitempty" json:"picker_scope,omitempty"`
 	StartedState      string   `toml:"started_state,omitempty" json:"started_state,omitempty"`
@@ -656,6 +672,7 @@ func buildRenderableEffectiveConfig(cfg EffectiveConfig) renderConfig {
 		linear := renderLinearConfig{
 			APIKeyEnv:         effectiveLinearAPIKeyEnv(cfg.Linear),
 			CredentialProfile: effectiveLinearCredentialProfile(cfg.Linear),
+			IssueSort:         effectiveLinearIssueSort(cfg.Linear),
 			TeamKeys:          cfg.Linear.TeamKeys,
 			PickerScope:       effectiveLinearPickerScope(cfg.Linear),
 			StartedState:      cfg.Linear.StartedState,

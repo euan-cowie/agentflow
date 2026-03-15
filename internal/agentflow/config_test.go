@@ -337,6 +337,24 @@ func TestValidateEffectiveConfigRejectsInvalidLinearCredentialProfile(t *testing
 	}
 }
 
+func TestValidateEffectiveConfigRejectsInvalidLinearIssueSort(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultEffectiveConfig()
+	cfg.Linear = LinearConfig{
+		APIKeyEnv: "LINEAR_API_KEY",
+		IssueSort: "oldest_first",
+	}
+
+	err := validateEffectiveConfig(cfg)
+	if err == nil {
+		t.Fatal("expected validateEffectiveConfig to reject invalid linear.issue_sort")
+	}
+	if !strings.Contains(err.Error(), "linear.issue_sort") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestValidateEffectiveConfigAllowsNoManagedEnvTargets(t *testing.T) {
 	t.Parallel()
 
@@ -514,6 +532,24 @@ func TestRenderEffectiveConfigIncludesLinearCredentialProfile(t *testing.T) {
 	}
 	if !strings.Contains(content, "credential_profile = 'acme'") {
 		t.Fatalf("expected rendered config to include credential_profile, got:\n%s", content)
+	}
+}
+
+func TestRenderEffectiveConfigIncludesLinearIssueSort(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultEffectiveConfig()
+	cfg.Linear = LinearConfig{
+		APIKeyEnv: "LINEAR_API_KEY",
+		IssueSort: "updated",
+	}
+
+	content, err := RenderEffectiveConfig(cfg, "toml")
+	if err != nil {
+		t.Fatalf("RenderEffectiveConfig returned error: %v", err)
+	}
+	if !strings.Contains(content, "issue_sort = 'updated'") {
+		t.Fatalf("expected rendered config to include issue_sort, got:\n%s", content)
 	}
 }
 

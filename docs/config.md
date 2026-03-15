@@ -200,6 +200,7 @@ Fields:
 
 - `api_key_env`
 - `credential_profile`
+- `issue_sort`
 - `team_keys`
 - `picker_scope`
 - `started_state`
@@ -208,6 +209,8 @@ Fields:
 Behavior:
 
 - when configured, `agentflow up` with no task opens a full-screen issue picker
+- `agentflow issues list` prints the same issue set and ordering that the `up` picker uses
+- `agentflow list` continues to show local tracked tasks, not tracker issues
 - bare issue keys such as `AF-123` resolve to Linear tasks
 - successful first-time `agentflow up` moves the issue into a started workflow state
 - `agentflow submit` links the PR back to the issue when a PR URL exists
@@ -224,6 +227,8 @@ Credential workflow:
 
 Current supported values:
 
+- `issue_sort`: `linear`, `identifier`, `updated`, or `state_then_updated`
+- `issue_sort = "state_then_updated"` puts active issues first, then sorts by most recent updates
 - `picker_scope`: `assigned` or `team`
 - `picker_scope = "assigned"` lists the viewer's assigned, non-completed issues
 - `picker_scope = "team"` requires `team_keys`
@@ -231,6 +236,7 @@ Current supported values:
 Defaults:
 
 - `api_key_env`: `LINEAR_API_KEY`
+- `issue_sort`: `state_then_updated`
 - `picker_scope`: `assigned`
 
 `credential_profile` is optional. When set, the repo opts into that named local Linear profile and no longer falls back to the legacy global stored credential.

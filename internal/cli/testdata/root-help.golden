@@ -10,9 +10,10 @@ Available Commands:
   completion  Generate the autocompletion script for the specified shell
   config      Inspect or write repo config
   doctor      Check required binaries and repo configuration
-  down        Tear down a task worktree and session
+  down        Tear down a tracked task worktree and session
   gc          Clean up merged task worktrees and sessions
   help        Help about any command
+  issues      Inspect available tracker issues
   land        Run preflight checks and enable merge for a task pull request
   list        List tracked tasks
   repair      Repair drift between task state, worktree metadata, and tmux

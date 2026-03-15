@@ -16,13 +16,14 @@
 - `agentflow attach <task>`
 - `agentflow status [task]`
 - `agentflow codex <task>`
+- `agentflow issues list`
 - `agentflow sync <task> [--all] [--push]`
 - `agentflow submit <task> [--draft|--ready]`
 - `agentflow land <task> [--watch]`
 - `agentflow verify <task> [--surface ...] [--foreground]`
 - `agentflow review <task> [--foreground]`
-- `agentflow down <task> [--delete-branch]`
-- `agentflow list`
+- `agentflow down <task> [--delete-branch] [--force]`
+- `agentflow list [--verbose]`
 - `agentflow gc [task]`
 - `agentflow doctor`
 - `agentflow repair <task>`
@@ -96,6 +97,7 @@ cleanup = "async"
 [linear]
 api_key_env = "LINEAR_API_KEY"
 credential_profile = "acme"
+issue_sort = "state_then_updated"
 
 [[ports.bindings]]
 target = "apps/web/.env.agentflow"
@@ -172,6 +174,8 @@ The delivery layer sits on top of the existing task lifecycle:
 
 GitHub automation is optional. If `[github].enabled` is omitted or false, `submit` still pushes the branch but `land` will refuse to continue.
 When `[linear]` is configured, running `agentflow up` without a task opens a full-screen issue picker over your active Linear issues.
+`agentflow list` remains the local task list, while `agentflow issues list` shows the same ordered issue set that the `up` picker uses.
+`agentflow down` accepts a tracked issue key like `TGG-132`, an explicit ref like `linear:TGG-132`, or an exact tracked task title; `--force` discards dirty worktree changes after a confirmation prompt.
 
 ## Notes
 
@@ -187,6 +191,7 @@ When `[linear]` is configured, running `agentflow up` without a task opens a ful
 - `[github]` enables optional `gh` integration for PR creation, checks, and merge automation.
 - `github.merge_method = "auto"` is GitHub-policy-aware: it prefers queue-compatible behavior first, then a linear-history-safe method when required, and otherwise falls back to regular merge.
 - `[linear]` enables optional Linear issue selection plus started/completed state sync for issue-backed tasks.
+- `linear.issue_sort` controls the default ordering shared by `agentflow up` and `agentflow issues list`; the default is `state_then_updated`.
 - `agentflow auth linear login --profile <name>` stores a reusable named Linear API key locally for repos that pin `[linear].credential_profile`.
 - `agentflow auth linear list` shows the stored legacy credential plus any named Linear profiles.
 - `agentflow doctor` reports GitHub merge policy details and warns when merge-queue repos need CI coverage for `merge_group` or `gh-readonly-queue/*` refs.

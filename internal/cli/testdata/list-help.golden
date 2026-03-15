@@ -1,0 +1,11 @@
+List tracked tasks
+
+Usage:
+  agentflow list [flags]
+
+Flags:
+  -h, --help      help for list
+      --verbose   Show branch, worktree, session, and the full saved failure reason
+
+Global Flags:
+      --repo string   Path inside the repo to operate on

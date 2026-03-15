@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/euan-cowie/agentflow/internal/agentflow"
 	"github.com/spf13/cobra"
@@ -261,15 +263,22 @@ func reviewCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
 
 func downCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
 	var deleteBranch bool
+	var force bool
 	cmd := &cobra.Command{
 		Use:   "down <task>",
-		Short: "Tear down a task worktree and session",
-		Args:  cobra.ExactArgs(1),
+		Short: "Tear down a tracked task worktree and session",
+		Long: "Tear down a tracked task worktree and session.\n\n" +
+			"<task> can be a Linear issue key like TGG-132, an explicit source ref like linear:TGG-132 or manual:fix auth flow, or the exact tracked task title.",
+		Example: "  agentflow down TGG-132\n" +
+			"  agentflow down linear:TGG-132\n" +
+			"  agentflow down \"fix auth flow\"",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			summary, err := app().Down(cmd.Context(), agentflow.DownOptions{
 				CommonOptions: agentflow.CommonOptions{RepoPath: *repoPath},
 				Task:          args[0],
 				DeleteBranch:  deleteBranch,
+				Force:         force,
 			})
 			if err != nil {
 				return err
@@ -279,11 +288,13 @@ func downCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&deleteBranch, "delete-branch", false, "Delete the branch after teardown if it is merged")
+	cmd.Flags().BoolVar(&force, "force", false, "Discard dirty worktree changes after an explicit confirmation prompt")
 	return cmd
 }
 
 func listCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
-	return &cobra.Command{
+	var verbose bool
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List tracked tasks",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -291,12 +302,34 @@ func listCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			for _, state := range states {
-				fmt.Fprintf(os.Stdout, "%s\t%s\t%s\t%s\t%s", state.TaskRef.Title, state.Status, state.Branch, state.WorktreePath, state.TmuxSession)
-				if state.FailureReason != "" {
-					fmt.Fprintf(os.Stdout, "\t%s", state.FailureReason)
-				}
-				fmt.Fprintln(os.Stdout)
+			printTaskStates(states, verbose)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&verbose, "verbose", false, "Show branch, worktree, session, and the full saved failure reason")
+	return cmd
+}
+
+func issuesCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "issues",
+		Short: "Inspect available tracker issues",
+	}
+	cmd.AddCommand(issuesListCommand(app, repoPath))
+	return cmd
+}
+
+func issuesListCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List available issues from the configured tracker",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			issues, err := app().LinearIssues(cmd.Context(), agentflow.CommonOptions{RepoPath: *repoPath})
+			if err != nil {
+				return err
+			}
+			for _, issue := range issues {
+				fmt.Fprintf(os.Stdout, "%s\t%s\t%s\n", issue.Identifier, issue.State.Name, issue.Title)
 			}
 			return nil
 		},
@@ -543,4 +576,80 @@ func printStatuses(statuses []agentflow.TaskStatus) {
 		}
 		fmt.Fprintln(os.Stdout)
 	}
+}
+
+func printTaskStates(states []agentflow.TaskState, verbose bool) {
+	for _, state := range states {
+		if verbose {
+			fmt.Fprintf(os.Stdout, "%s\t%s\t%s\t%s\t%s", taskListIdentifier(state), state.Status, state.Branch, state.WorktreePath, state.TmuxSession)
+			if state.FailureReason != "" {
+				fmt.Fprintf(os.Stdout, "\t%s", state.FailureReason)
+			}
+			fmt.Fprintln(os.Stdout)
+			continue
+		}
+
+		fmt.Fprintf(os.Stdout, "%s\t%s", taskListIdentifier(state), state.Status)
+		if title := taskListTitle(state); title != "" {
+			fmt.Fprintf(os.Stdout, "\t%s", title)
+		}
+		if state.FailureReason != "" {
+			fmt.Fprintf(os.Stdout, "\terror=%s", summarizeFailureReason(state.FailureReason))
+		}
+		fmt.Fprintln(os.Stdout)
+	}
+}
+
+func taskListIdentifier(state agentflow.TaskState) string {
+	if strings.EqualFold(strings.TrimSpace(state.TaskRef.Source), "linear") && strings.TrimSpace(state.TaskRef.Key) != "" {
+		return strings.TrimSpace(state.TaskRef.Key)
+	}
+	if title := strings.TrimSpace(state.TaskRef.Title); title != "" {
+		return title
+	}
+	if key := strings.TrimSpace(state.TaskRef.Key); key != "" {
+		return key
+	}
+	return state.TaskID
+}
+
+func taskListTitle(state agentflow.TaskState) string {
+	title := strings.TrimSpace(state.TaskRef.Title)
+	if title == "" {
+		return ""
+	}
+	if strings.EqualFold(strings.TrimSpace(state.TaskRef.Source), "linear") {
+		key := strings.TrimSpace(state.TaskRef.Key)
+		if key != "" {
+			trimmed := strings.TrimSpace(strings.TrimPrefix(title, key))
+			if trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
+}
+
+func summarizeFailureReason(reason string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return ""
+	}
+	if idx := strings.Index(reason, "{"); idx >= 0 {
+		var payload struct {
+			Errors []struct {
+				Message string `json:"message"`
+			} `json:"errors"`
+		}
+		if err := json.Unmarshal([]byte(reason[idx:]), &payload); err == nil {
+			if len(payload.Errors) > 0 && strings.TrimSpace(payload.Errors[0].Message) != "" {
+				reason = strings.TrimSpace(payload.Errors[0].Message)
+			}
+		}
+	}
+	reason = strings.Join(strings.Fields(reason), " ")
+	if len(reason) > 120 {
+		return reason[:117] + "..."
+	}
+	return reason
 }

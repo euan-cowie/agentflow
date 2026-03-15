@@ -152,6 +152,11 @@ func (g GitOps) RemoveWorktree(ctx context.Context, repoRoot, path string) error
 	return err
 }
 
+func (g GitOps) RemoveWorktreeForce(ctx context.Context, repoRoot, path string) error {
+	_, err := g.exec.Run(ctx, repoRoot, nil, "git", "worktree", "remove", "--force", path)
+	return err
+}
+
 func (g GitOps) RepairWorktree(ctx context.Context, repoRoot, path string) error {
 	_, err := g.exec.Run(ctx, repoRoot, nil, "git", "worktree", "repair", path)
 	return err
