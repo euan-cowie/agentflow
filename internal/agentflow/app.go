@@ -655,7 +655,7 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) ([]DoctorCheck, er
 			checks = append(checks, DoctorCheck{
 				Name:    "linear-credential",
 				OK:      status.Available,
-				Details: status.Source,
+				Details: describeCredentialStatus(status),
 			})
 			if err == nil && status.Available {
 				apiKey, _, _ := a.resolveLinearCredential(runtime.EffectiveConfig.Linear)

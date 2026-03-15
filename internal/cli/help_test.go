@@ -34,6 +34,21 @@ func TestCLIHelpGolden(t *testing.T) {
 			args:   []string{"auth", "--help"},
 			golden: "auth-help.golden",
 		},
+		{
+			name:   "auth-linear-help",
+			args:   []string{"auth", "linear", "--help"},
+			golden: "auth-linear-help.golden",
+		},
+		{
+			name:   "auth-linear-login-help",
+			args:   []string{"auth", "linear", "login", "--help"},
+			golden: "auth-linear-login-help.golden",
+		},
+		{
+			name:   "auth-linear-logout-help",
+			args:   []string{"auth", "linear", "logout", "--help"},
+			golden: "auth-linear-logout-help.golden",
+		},
 	}
 
 	for _, tc := range cases {

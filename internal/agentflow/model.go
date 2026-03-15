@@ -50,11 +50,12 @@ type GitHubConfig struct {
 }
 
 type LinearConfig struct {
-	APIKeyEnv      string   `toml:"api_key_env" json:"api_key_env"`
-	TeamKeys       []string `toml:"team_keys" json:"team_keys"`
-	PickerScope    string   `toml:"picker_scope" json:"picker_scope"`
-	StartedState   string   `toml:"started_state" json:"started_state"`
-	CompletedState string   `toml:"completed_state" json:"completed_state"`
+	APIKeyEnv         string   `toml:"api_key_env" json:"api_key_env"`
+	CredentialProfile string   `toml:"credential_profile" json:"credential_profile"`
+	TeamKeys          []string `toml:"team_keys" json:"team_keys"`
+	PickerScope       string   `toml:"picker_scope" json:"picker_scope"`
+	StartedState      string   `toml:"started_state" json:"started_state"`
+	CompletedState    string   `toml:"completed_state" json:"completed_state"`
 }
 
 type PortBindingConfig struct {

@@ -12,7 +12,7 @@
 ## Commands
 
 - `agentflow up [task] [--surface ...] [--repo ...]`
-- `agentflow auth linear login|logout|status`
+- `agentflow auth linear login|logout|status|list`
 - `agentflow attach <task>`
 - `agentflow status [task]`
 - `agentflow codex <task>`
@@ -95,6 +95,7 @@ cleanup = "async"
 
 [linear]
 api_key_env = "LINEAR_API_KEY"
+credential_profile = "acme"
 
 [[ports.bindings]]
 target = "apps/web/.env.agentflow"
@@ -148,7 +149,8 @@ Task inputs now support:
 Linear credentials resolve in this order:
 
 1. the env var named by `linear.api_key_env` or `LINEAR_API_KEY`
-2. a stored credential written by `agentflow auth linear login`
+2. the stored credential profile named by `linear.credential_profile`, when configured
+3. the legacy stored credential written by `agentflow auth linear login` when no profile is configured
 
 Important behavior note:
 
@@ -185,7 +187,8 @@ When `[linear]` is configured, running `agentflow up` without a task opens a ful
 - `[github]` enables optional `gh` integration for PR creation, checks, and merge automation.
 - `github.merge_method = "auto"` is GitHub-policy-aware: it prefers queue-compatible behavior first, then a linear-history-safe method when required, and otherwise falls back to regular merge.
 - `[linear]` enables optional Linear issue selection plus started/completed state sync for issue-backed tasks.
-- `agentflow auth linear login` stores a reusable Linear API key locally so repo commands do not require an env var on every shell.
+- `agentflow auth linear login --profile <name>` stores a reusable named Linear API key locally for repos that pin `[linear].credential_profile`.
+- `agentflow auth linear list` shows the stored legacy credential plus any named Linear profiles.
 - `agentflow doctor` reports GitHub merge policy details and warns when merge-queue repos need CI coverage for `merge_group` or `gh-readonly-queue/*` refs.
 - Runtime workflow does not fall back to implicit tmux windows or agent commands; declare them explicitly in `.agentflow/config.toml`.
 - Repo-local Codex guidance for CLI/docs sync lives in [AGENTS.md](/Users/euan-cowie/Projects/agentflow/AGENTS.md) and [.agentflow/skills/cli-doc-sync/SKILL.md](/Users/euan-cowie/Projects/agentflow/.agentflow/skills/cli-doc-sync/SKILL.md).

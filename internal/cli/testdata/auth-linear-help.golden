@@ -1,0 +1,18 @@
+Manage Linear credentials
+
+Usage:
+  agentflow auth linear [command]
+
+Available Commands:
+  list        List stored Linear credentials
+  login       Validate and store a Linear API key
+  logout      Delete the stored Linear API key
+  status      Show how the Linear API key resolves
+
+Flags:
+  -h, --help   help for linear
+
+Global Flags:
+      --repo string   Path inside the repo to operate on
+
+Use "agentflow auth linear [command] --help" for more information about a command.

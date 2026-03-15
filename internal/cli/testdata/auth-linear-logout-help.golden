@@ -1,0 +1,11 @@
+Delete the stored Linear API key
+
+Usage:
+  agentflow auth linear logout [flags]
+
+Flags:
+  -h, --help             help for logout
+      --profile string   Credential profile name to delete
+
+Global Flags:
+      --repo string   Path inside the repo to operate on

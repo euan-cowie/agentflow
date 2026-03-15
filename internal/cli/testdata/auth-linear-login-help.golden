@@ -1,0 +1,12 @@
+Validate and store a Linear API key
+
+Usage:
+  agentflow auth linear login [flags]
+
+Flags:
+  -h, --help             help for login
+      --profile string   Credential profile name to store
+      --token string     Linear API key to store
+
+Global Flags:
+      --repo string   Path inside the repo to operate on

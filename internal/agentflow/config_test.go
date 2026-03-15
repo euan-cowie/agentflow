@@ -224,6 +224,22 @@ func TestWorkflowTrustEntriesIncludeLinearAccess(t *testing.T) {
 	}
 }
 
+func TestWorkflowTrustEntriesIncludeLinearProfileAccess(t *testing.T) {
+	t.Parallel()
+
+	cfg := ConfigFile{
+		Linear: LinearConfig{
+			APIKeyEnv:         "LINEAR_API_KEY",
+			CredentialProfile: "acme",
+		},
+	}
+
+	entries := workflowTrustEntries(cfg)
+	if !contains(entries, "read and update Linear issues using LINEAR_API_KEY or stored Linear profile acme") {
+		t.Fatalf("expected Linear profile trust entry, got %v", entries)
+	}
+}
+
 func TestEffectiveManagedEnvFilesUsesDeclaredTargets(t *testing.T) {
 	t.Parallel()
 
@@ -300,6 +316,23 @@ func TestValidateEffectiveConfigRejectsLinearTeamScopeWithoutTeamKeys(t *testing
 		t.Fatal("expected validateEffectiveConfig to reject missing linear.team_keys")
 	}
 	if !strings.Contains(err.Error(), "linear.team_keys") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateEffectiveConfigRejectsInvalidLinearCredentialProfile(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultEffectiveConfig()
+	cfg.Linear = LinearConfig{
+		CredentialProfile: "../acme",
+	}
+
+	err := validateEffectiveConfig(cfg)
+	if err == nil {
+		t.Fatal("expected validateEffectiveConfig to reject invalid linear.credential_profile")
+	}
+	if !strings.Contains(err.Error(), "linear.credential_profile") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -463,6 +496,24 @@ func TestRenderEffectiveConfigOmitsEmptyFields(t *testing.T) {
 		if strings.Contains(content, unexpected) {
 			t.Fatalf("expected rendered config to omit %q, got:\n%s", unexpected, content)
 		}
+	}
+}
+
+func TestRenderEffectiveConfigIncludesLinearCredentialProfile(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultEffectiveConfig()
+	cfg.Linear = LinearConfig{
+		APIKeyEnv:         "LINEAR_API_KEY",
+		CredentialProfile: "acme",
+	}
+
+	content, err := RenderEffectiveConfig(cfg, "toml")
+	if err != nil {
+		t.Fatalf("RenderEffectiveConfig returned error: %v", err)
+	}
+	if !strings.Contains(content, "credential_profile = 'acme'") {
+		t.Fatalf("expected rendered config to include credential_profile, got:\n%s", content)
 	}
 }
 

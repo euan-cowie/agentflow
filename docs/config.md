@@ -18,7 +18,8 @@ Task inputs can be:
 Linear credentials resolve in this order:
 
 1. the env var named by `linear.api_key_env` or `LINEAR_API_KEY`
-2. the stored credential written by `agentflow auth linear login`
+2. the stored credential profile named by `linear.credential_profile`, when configured
+3. the legacy stored credential written by `agentflow auth linear login` when no profile is configured
 
 The only built-in defaults that remain are tool-owned mechanics:
 
@@ -198,6 +199,7 @@ Optional Linear issue integration for issue-backed task creation.
 Fields:
 
 - `api_key_env`
+- `credential_profile`
 - `team_keys`
 - `picker_scope`
 - `started_state`
@@ -213,9 +215,12 @@ Behavior:
 
 Credential workflow:
 
-- `agentflow auth linear login` validates and stores a reusable Linear API key
-- `agentflow auth linear status` shows whether resolution is using env or stored credentials
-- `agentflow auth linear logout` deletes the stored credential
+- `agentflow auth linear login` validates and stores the legacy reusable Linear API key
+- `agentflow auth linear login --profile <name>` validates and stores a named Linear credential profile
+- `agentflow auth linear list` shows the stored legacy credential plus any named Linear profiles
+- `agentflow auth linear status` shows whether resolution is using env, a named profile, or the legacy stored credential
+- `agentflow auth linear logout` deletes the legacy stored credential
+- `agentflow auth linear logout --profile <name>` deletes one named Linear credential profile
 
 Current supported values:
 
@@ -227,6 +232,8 @@ Defaults:
 
 - `api_key_env`: `LINEAR_API_KEY`
 - `picker_scope`: `assigned`
+
+`credential_profile` is optional. When set, the repo opts into that named local Linear profile and no longer falls back to the legacy global stored credential.
 
 `started_state` and `completed_state` are optional workflow state names. If omitted, agentflow falls back to the first Linear workflow state with type `started` or `completed` for that issue's team.
 
