@@ -3,10 +3,12 @@ package agentflow
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const testRepoGitHubConfig = `
@@ -810,6 +812,177 @@ func TestSubmitPreservesMergedPullRequestState(t *testing.T) {
 	prState := readFakePullRequestState(t, ghStateDir)
 	if prState.State != "MERGED" {
 		t.Fatalf("expected merged PR state to remain merged, got %+v", prState)
+	}
+}
+
+func TestLandSyncsLinearWhenPullRequestAlreadyMerged(t *testing.T) {
+	repo, _ := initCommittedRepoWithRemote(t)
+	ghStateDir := installFakeGitHubCLI(t)
+	writeTestRepoConfig(t, repo, testRepoGitHubConfig+`
+
+[linear]
+api_key_env = "LINEAR_API_KEY"
+`)
+
+	var attachmentCalls int
+	var issueQueryCalls int
+	var issueUpdateCalls int
+	app, _, _ := newTestApp(t)
+	app.linear = newLinearTestOps(t, func(r *http.Request) (*http.Response, error) {
+		payload := readLinearPayload(t, r.Body)
+		query := payload["query"].(string)
+		variables, _ := payload["variables"].(map[string]any)
+		switch {
+		case strings.Contains(query, "query Issue"):
+			issueQueryCalls++
+			if variables["id"] != "issue-1" {
+				t.Fatalf("expected issue lookup by stable issue id, got %+v", variables)
+			}
+			return linearHTTPResponse(t, map[string]any{
+				"data": map[string]any{
+					"issue": map[string]any{
+						"id":         "issue-1",
+						"identifier": "AF-123",
+						"title":      "Fix auth flow",
+						"url":        "https://linear.app/example/issue/AF-123",
+						"team":       map[string]any{"id": "team-1", "key": "AF", "name": "Agentflow"},
+						"state":      map[string]any{"id": "state-1", "name": "In Progress", "type": "started"},
+					},
+				},
+			}), nil
+		case strings.Contains(query, "query WorkflowStates"):
+			return linearHTTPResponse(t, map[string]any{
+				"data": map[string]any{
+					"workflowStates": map[string]any{
+						"nodes": []map[string]any{
+							{"id": "state-2", "name": "Done", "type": "completed"},
+						},
+					},
+				},
+			}), nil
+		case strings.Contains(query, "mutation AttachmentCreate"):
+			attachmentCalls++
+			return linearHTTPResponse(t, map[string]any{
+				"data": map[string]any{
+					"attachmentCreate": map[string]any{"success": true},
+				},
+			}), nil
+		case strings.Contains(query, "mutation IssueUpdate"):
+			issueUpdateCalls++
+			return linearHTTPResponse(t, map[string]any{
+				"data": map[string]any{
+					"issueUpdate": map[string]any{
+						"success": true,
+						"issue": map[string]any{
+							"id":         "issue-1",
+							"identifier": "AF-123",
+							"title":      "Fix auth flow",
+							"url":        "https://linear.app/example/issue/AF-123",
+							"team":       map[string]any{"id": "team-1", "key": "AF", "name": "Agentflow"},
+							"state":      map[string]any{"id": "state-2", "name": "Done", "type": "completed"},
+						},
+					},
+				},
+			}), nil
+		default:
+			t.Fatalf("unexpected Linear query: %s", query)
+			return nil, nil
+		}
+	})
+	t.Setenv("LINEAR_API_KEY", "test-token")
+
+	ctx := context.Background()
+	exec := Executor{}
+	git := NewGitOps(exec)
+	repoRoot, err := git.RepoRoot(ctx, repo)
+	if err != nil {
+		t.Fatalf("RepoRoot returned error: %v", err)
+	}
+	repoRoot, err = filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks returned error: %v", err)
+	}
+	ref, taskID, err := resolveLinearTask(repoRoot, LinearIssue{
+		ID:         "issue-1",
+		Identifier: "AF-123",
+		Title:      "Fix auth flow",
+		URL:        "https://linear.app/example/issue/AF-123",
+	})
+	if err != nil {
+		t.Fatalf("resolveLinearTask returned error: %v", err)
+	}
+	cfg := defaultEffectiveConfig()
+	cfg.Repo.Name = filepath.Base(repo)
+	branch := branchName(cfg, ref, taskID)
+	worktree := filepath.Join(t.TempDir(), ref.Slug+"-"+taskID[:6])
+	if err := git.CreateWorktree(ctx, repo, branch, worktree, "main"); err != nil {
+		t.Fatalf("CreateWorktree returned error: %v", err)
+	}
+
+	headSHA := runGitCapture(t, worktree, "rev-parse", "HEAD")
+	writeFakePullRequestState(t, ghStateDir, fakePullRequestState{
+		Number:     17,
+		URL:        "https://example.com/pr/17",
+		State:      "MERGED",
+		IsDraft:    false,
+		Base:       "main",
+		Head:       branch,
+		HeadOID:    headSHA,
+		HeadOwner:  "origin",
+		HeadRepo:   "origin",
+		MergeState: "MERGED",
+		MergedAt:   "2026-03-15T00:00:00Z",
+	})
+
+	now := time.Now().UTC()
+	state := TaskState{
+		TaskID:       taskID,
+		TaskRef:      ref,
+		Status:       StatusReady,
+		RepoRoot:     repoRoot,
+		RepoID:       repoID(repoRoot),
+		WorktreePath: worktree,
+		Branch:       branch,
+		BaseBranch:   "main",
+		Surface:      "default",
+		TmuxSession:  renderSessionName(cfg, ref, taskID),
+		Delivery: TaskDeliveryState{
+			State:             DeliveryStateSubmitted,
+			Remote:            "origin",
+			RemoteBranch:      branch,
+			PullRequestNumber: 17,
+			PullRequestURL:    "https://example.com/pr/17",
+			PullRequestState:  "OPEN",
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := app.state.Save(state); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	landed, err := app.Land(ctx, LandOptions{
+		CommonOptions: CommonOptions{RepoPath: repo},
+		Task:          "AF-123",
+	})
+	if err != nil {
+		t.Fatalf("Land returned error: %v", err)
+	}
+	if landed.Delivery.State != DeliveryStateMerged {
+		t.Fatalf("expected merged delivery state, got %+v", landed.Delivery)
+	}
+	if attachmentCalls != 1 {
+		t.Fatalf("expected one Linear attachment sync, got %d (issue queries=%d updates=%d landed=%+v)", attachmentCalls, issueQueryCalls, issueUpdateCalls, landed.Delivery)
+	}
+	if issueUpdateCalls != 1 {
+		t.Fatalf("expected one Linear completion sync, got %d", issueUpdateCalls)
+	}
+	loaded, err := app.state.Load(repoID(repoRoot), taskID)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if loaded.IssueState != "Done" {
+		t.Fatalf("expected merged land to complete Linear issue, got %+v", loaded)
 	}
 }
 

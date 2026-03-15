@@ -5,6 +5,7 @@ Usage:
 
 Available Commands:
   attach      Attach to the tmux session for a task
+  auth        Manage stored credentials
   codex       Jump to the primary Codex window for a task
   completion  Generate the autocompletion script for the specified shell
   config      Inspect or write repo config

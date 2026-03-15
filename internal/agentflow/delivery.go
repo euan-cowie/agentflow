@@ -15,11 +15,7 @@ func (a *App) Status(ctx context.Context, opts CommonOptions, task string) ([]Ta
 
 	var states []TaskState
 	if strings.TrimSpace(task) != "" {
-		_, taskID, err := resolveManualTask(runtime.RepoRoot, task)
-		if err != nil {
-			return nil, err
-		}
-		state, err := a.state.Load(runtime.RepoID, taskID)
+		state, err := a.loadTaskByInput(ctx, runtime, task)
 		if err != nil {
 			return nil, err
 		}
@@ -90,6 +86,16 @@ func (a *App) Submit(ctx context.Context, opts SubmitOptions) (TaskSummary, erro
 		return TaskSummary{}, err
 	}
 	if state.Delivery.State == DeliveryStateMerged {
+		if err := a.ensureLinearPullRequestLink(ctx, runtime, &state); err != nil {
+			return a.failState(state, err)
+		}
+		if err := a.reconcileLinearTask(ctx, runtime, &state); err != nil {
+			return a.failState(state, err)
+		}
+		state.UpdatedAt = a.now()
+		if err := a.state.Save(state); err != nil {
+			return TaskSummary{}, err
+		}
 		return a.summaryForState(state), nil
 	}
 
@@ -121,6 +127,12 @@ func (a *App) Submit(ctx context.Context, opts SubmitOptions) (TaskSummary, erro
 	if pr != nil {
 		updateDeliveryFromPullRequest(&state, *pr)
 		state.Delivery.LastSubmittedAt = a.now()
+	}
+	if err := a.ensureLinearPullRequestLink(ctx, runtime, &state); err != nil {
+		return a.failState(state, err)
+	}
+	if err := a.reconcileLinearTask(ctx, runtime, &state); err != nil {
+		return a.failState(state, err)
 	}
 	state.UpdatedAt = a.now()
 	if err := a.state.Save(state); err != nil {
@@ -154,6 +166,16 @@ func (a *App) Land(ctx context.Context, opts LandOptions) (TaskSummary, error) {
 		return TaskSummary{}, err
 	}
 	if state.Delivery.State == DeliveryStateMerged {
+		if err := a.ensureLinearPullRequestLink(ctx, runtime, &state); err != nil {
+			return a.failState(state, err)
+		}
+		if err := a.reconcileLinearTask(ctx, runtime, &state); err != nil {
+			return a.failState(state, err)
+		}
+		state.UpdatedAt = a.now()
+		if err := a.state.Save(state); err != nil {
+			return TaskSummary{}, err
+		}
 		return a.summaryForState(state), nil
 	}
 
@@ -190,6 +212,12 @@ func (a *App) Land(ctx context.Context, opts LandOptions) (TaskSummary, error) {
 	}
 	if strings.EqualFold(pr.State, "MERGED") {
 		updateDeliveryFromPullRequest(&state, *pr)
+		if err := a.ensureLinearPullRequestLink(ctx, runtime, &state); err != nil {
+			return a.failState(state, err)
+		}
+		if err := a.reconcileLinearTask(ctx, runtime, &state); err != nil {
+			return a.failState(state, err)
+		}
 		state.UpdatedAt = a.now()
 		if err := a.state.Save(state); err != nil {
 			return TaskSummary{}, err
@@ -229,6 +257,12 @@ func (a *App) Land(ctx context.Context, opts LandOptions) (TaskSummary, error) {
 			return a.failState(state, err)
 		}
 		updateDeliveryFromPullRequest(&state, watched)
+	}
+	if err := a.ensureLinearPullRequestLink(ctx, runtime, &state); err != nil {
+		return a.failState(state, err)
+	}
+	if err := a.reconcileLinearTask(ctx, runtime, &state); err != nil {
+		return a.failState(state, err)
 	}
 
 	state.UpdatedAt = a.now()
@@ -272,10 +306,17 @@ func (a *App) GC(ctx context.Context, opts GCOptions) ([]TaskSummary, error) {
 			results = append(results, summary)
 			continue
 		}
+		if err := a.reconcileLinearTask(ctx, runtime, &state); err != nil {
+			return nil, err
+		}
+		state.UpdatedAt = a.now()
+		if err := a.state.Save(state); err != nil {
+			return nil, err
+		}
 
 		summary, err := a.Down(ctx, DownOptions{
 			CommonOptions: opts.CommonOptions,
-			Task:          state.TaskRef.Title,
+			Task:          taskLookupInput(state),
 			DeleteBranch:  false,
 		})
 		if err != nil {
@@ -299,11 +340,7 @@ func (a *App) loadTaskForMutation(ctx context.Context, opts CommonOptions, task 
 	if err != nil {
 		return RuntimeConfig{}, TaskState{}, err
 	}
-	_, taskID, err := resolveManualTask(runtime.RepoRoot, task)
-	if err != nil {
-		return RuntimeConfig{}, TaskState{}, err
-	}
-	state, err := a.state.Load(runtime.RepoID, taskID)
+	state, err := a.loadTaskByInput(ctx, runtime, task)
 	if err != nil {
 		return RuntimeConfig{}, TaskState{}, err
 	}
@@ -318,11 +355,7 @@ func (a *App) syncTargets(ctx context.Context, runtime RuntimeConfig, task strin
 		}
 		return states, nil
 	}
-	_, taskID, err := resolveManualTask(runtime.RepoRoot, task)
-	if err != nil {
-		return nil, err
-	}
-	state, err := a.state.Load(runtime.RepoID, taskID)
+	state, err := a.loadTaskByInput(ctx, runtime, task)
 	if err != nil {
 		return nil, err
 	}
@@ -342,6 +375,11 @@ func (a *App) inspectTaskStatus(ctx context.Context, runtime RuntimeConfig, stat
 		FailureReason: state.FailureReason,
 		ConfigDrift:   state.WorkflowFingerprint != runtime.WorkflowFingerprint,
 		Delivery:      state.Delivery,
+	}
+	if isLinearTask(state) {
+		status.Issue = state.TaskRef.Key
+		status.IssueURL = state.TaskRef.URL
+		status.IssueState = state.IssueState
 	}
 	if err := a.git.ValidateTaskWorktree(ctx, state); err != nil {
 		if status.FailureReason == "" {
@@ -381,6 +419,29 @@ func (a *App) inspectTaskStatus(ctx context.Context, runtime RuntimeConfig, stat
 			}
 		}
 	}
+	if isLinearTask(state) {
+		before := state
+		if runtime.Trusted && linearConfigured(runtime.EffectiveConfig.Linear) {
+			if err := a.reconcileLinearTask(ctx, runtime, &state); err != nil {
+				return status, err
+			}
+		}
+		status.TaskTitle = state.TaskRef.Title
+		status.Issue = state.TaskRef.Key
+		status.IssueURL = state.TaskRef.URL
+		status.IssueState = state.IssueState
+		status.Delivery = state.Delivery
+		if state.TaskRef.Title != before.TaskRef.Title ||
+			state.TaskRef.URL != before.TaskRef.URL ||
+			state.TaskRef.ID != before.TaskRef.ID ||
+			state.IssueState != before.IssueState ||
+			state.Delivery != before.Delivery {
+			state.UpdatedAt = a.now()
+			if err := a.state.Save(state); err != nil {
+				return status, err
+			}
+		}
+	}
 	return status, nil
 }
 
@@ -402,6 +463,20 @@ func (a *App) syncTask(ctx context.Context, runtime RuntimeConfig, state TaskSta
 		}
 		state.Delivery.Remote = remote
 		state.Delivery.RemoteBranch = state.Branch
+		state.UpdatedAt = a.now()
+		if err := a.state.Save(state); err != nil {
+			return TaskSummary{}, err
+		}
+	}
+	before := state
+	if err := a.reconcileLinearTask(ctx, runtime, &state); err != nil {
+		return a.failState(state, err)
+	}
+	if state.TaskRef.Title != before.TaskRef.Title ||
+		state.TaskRef.URL != before.TaskRef.URL ||
+		state.TaskRef.ID != before.TaskRef.ID ||
+		state.IssueState != before.IssueState ||
+		state.Delivery != before.Delivery {
 		state.UpdatedAt = a.now()
 		if err := a.state.Save(state); err != nil {
 			return TaskSummary{}, err
@@ -752,7 +827,7 @@ func (a *App) isTaskMerged(ctx context.Context, runtime RuntimeConfig, state Tas
 }
 
 func (a *App) summaryForState(state TaskState) TaskSummary {
-	return TaskSummary{
+	summary := TaskSummary{
 		TaskID:    state.TaskID,
 		TaskTitle: state.TaskRef.Title,
 		RepoRoot:  state.RepoRoot,
@@ -763,4 +838,10 @@ func (a *App) summaryForState(state TaskState) TaskSummary {
 		Status:    state.Status,
 		Delivery:  state.Delivery,
 	}
+	if isLinearTask(state) {
+		summary.Issue = state.TaskRef.Key
+		summary.IssueURL = state.TaskRef.URL
+		summary.IssueState = state.IssueState
+	}
+	return summary
 }

@@ -29,6 +29,7 @@ func NewRootCommand() *cobra.Command {
 	}
 
 	root.AddCommand(upCommand(func() *agentflow.App { return appFor() }, &repoPath))
+	root.AddCommand(authCommand(func() *agentflow.App { return appFor() }, &repoPath))
 	root.AddCommand(attachCommand(func() *agentflow.App { return appFor() }, &repoPath))
 	root.AddCommand(statusCommand(func() *agentflow.App { return appFor() }, &repoPath))
 	root.AddCommand(codexCommand(func() *agentflow.App { return appFor() }, &repoPath))

@@ -209,6 +209,21 @@ func TestWorkflowTrustEntriesIncludeSideEffectfulWorkflow(t *testing.T) {
 	}
 }
 
+func TestWorkflowTrustEntriesIncludeLinearAccess(t *testing.T) {
+	t.Parallel()
+
+	cfg := ConfigFile{
+		Linear: LinearConfig{
+			APIKeyEnv: "LINEAR_API_KEY",
+		},
+	}
+
+	entries := workflowTrustEntries(cfg)
+	if !contains(entries, "read and update Linear issues using LINEAR_API_KEY") {
+		t.Fatalf("expected Linear trust entry, got %v", entries)
+	}
+}
+
 func TestEffectiveManagedEnvFilesUsesDeclaredTargets(t *testing.T) {
 	t.Parallel()
 
@@ -268,6 +283,24 @@ func TestValidateEffectiveConfigRejectsUndeclaredBindingTarget(t *testing.T) {
 	err := validateEffectiveConfig(cfg)
 	if err == nil {
 		t.Fatal("expected undeclared binding target to fail validation")
+	}
+}
+
+func TestValidateEffectiveConfigRejectsLinearTeamScopeWithoutTeamKeys(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultEffectiveConfig()
+	cfg.Linear = LinearConfig{
+		APIKeyEnv:   "LINEAR_API_KEY",
+		PickerScope: "team",
+	}
+
+	err := validateEffectiveConfig(cfg)
+	if err == nil {
+		t.Fatal("expected validateEffectiveConfig to reject missing linear.team_keys")
+	}
+	if !strings.Contains(err.Error(), "linear.team_keys") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -455,6 +488,26 @@ func TestWorkflowFingerprintChangesForDeliveryAndGitHubSections(t *testing.T) {
 
 	if first == second {
 		t.Fatal("expected delivery/github changes to affect workflow fingerprint")
+	}
+}
+
+func TestWorkflowFingerprintChangesForLinearSection(t *testing.T) {
+	t.Parallel()
+
+	cfg := ConfigFile{}
+	first, err := workflowFingerprint(cfg)
+	if err != nil {
+		t.Fatalf("workflowFingerprint returned error: %v", err)
+	}
+
+	cfg.Linear.APIKeyEnv = "LINEAR_API_KEY"
+	second, err := workflowFingerprint(cfg)
+	if err != nil {
+		t.Fatalf("workflowFingerprint returned error: %v", err)
+	}
+
+	if first == second {
+		t.Fatal("expected linear changes to affect workflow fingerprint")
 	}
 }
 

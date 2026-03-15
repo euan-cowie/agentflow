@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -11,13 +12,29 @@ import (
 func upCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
 	var surface string
 	cmd := &cobra.Command{
-		Use:   "up <task>",
+		Use:   "up [task]",
 		Short: "Create or resume a task worktree and tmux session",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			task := ""
+			if len(args) == 1 {
+				task = args[0]
+			} else {
+				issues, err := app().LinearIssues(cmd.Context(), agentflow.CommonOptions{RepoPath: *repoPath})
+				if err != nil {
+					return err
+				}
+				task, err = pickLinearIssue(issues)
+				if errors.Is(err, errLinearIssueSelectionCancelled) {
+					return nil
+				}
+				if err != nil {
+					return err
+				}
+			}
 			summary, err := app().Up(cmd.Context(), agentflow.UpOptions{
 				CommonOptions: agentflow.CommonOptions{RepoPath: *repoPath},
-				Task:          args[0],
+				Task:          task,
 				Surface:       surface,
 			})
 			if err != nil {
@@ -438,6 +455,15 @@ func printSummary(summary agentflow.TaskSummary) {
 	if summary.LogPath != "" {
 		fmt.Fprintf(os.Stdout, "log=%s\n", summary.LogPath)
 	}
+	if summary.Issue != "" {
+		fmt.Fprintf(os.Stdout, "issue=%s\n", summary.Issue)
+	}
+	if summary.IssueURL != "" {
+		fmt.Fprintf(os.Stdout, "issue_url=%s\n", summary.IssueURL)
+	}
+	if summary.IssueState != "" {
+		fmt.Fprintf(os.Stdout, "issue_state=%s\n", summary.IssueState)
+	}
 	if summary.Delivery.State != "" {
 		fmt.Fprintf(os.Stdout, "delivery_state=%s\n", summary.Delivery.State)
 	}
@@ -474,6 +500,15 @@ func printStatuses(statuses []agentflow.TaskStatus) {
 		}
 		if status.FailureReason != "" {
 			fmt.Fprintf(os.Stdout, "failure=%s\n", status.FailureReason)
+		}
+		if status.Issue != "" {
+			fmt.Fprintf(os.Stdout, "issue=%s\n", status.Issue)
+		}
+		if status.IssueURL != "" {
+			fmt.Fprintf(os.Stdout, "issue_url=%s\n", status.IssueURL)
+		}
+		if status.IssueState != "" {
+			fmt.Fprintf(os.Stdout, "issue_state=%s\n", status.IssueState)
 		}
 		fmt.Fprintf(os.Stdout, "delivery_state=%s\n", status.Delivery.State)
 		fmt.Fprintf(os.Stdout, "dirty=%t\nahead=%d\nbehind=%d\n", status.Dirty, status.Ahead, status.Behind)

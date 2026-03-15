@@ -15,10 +15,12 @@ type App struct {
 	exec   Executor
 	git    GitOps
 	gh     GitHubOps
+	linear LinearOps
 	tmux   TmuxOps
 	runner AgentRunner
 	state  *StateStore
 	trust  *TrustStore
+	creds  *CredentialStore
 	stdin  io.Reader
 	stdout io.Writer
 	stderr io.Writer
@@ -88,10 +90,12 @@ func NewApp(stdin io.Reader, stdout, stderr io.Writer) (*App, error) {
 		exec:   exec,
 		git:    NewGitOps(exec),
 		gh:     NewGitHubOps(exec),
+		linear: NewLinearOps(nil),
 		tmux:   NewTmuxOps(exec),
 		runner: AgentRunner{},
 		state:  NewStateStore(stateRoot),
 		trust:  NewTrustStore(stateRoot),
+		creds:  NewCredentialStore(stateRoot),
 		stdin:  stdin,
 		stdout: stdout,
 		stderr: stderr,
@@ -144,6 +148,23 @@ func (a *App) lockRepo(runtime RuntimeConfig) (func(), error) {
 	}, nil
 }
 
+func (a *App) ensureWorkflowTrusted(runtime *RuntimeConfig) error {
+	trusted, err := a.trust.EnsureTrusted(
+		runtime.RepoID,
+		runtime.RepoRoot,
+		runtime.ConfigPath,
+		runtime.WorkflowFingerprint,
+		workflowTrustEntries(runtime.Config),
+		a.stdin,
+		a.stdout,
+	)
+	if err != nil {
+		return err
+	}
+	runtime.Trusted = trusted
+	return nil
+}
+
 func (a *App) Up(ctx context.Context, opts UpOptions) (TaskSummary, error) {
 	runtime, err := a.loadRuntime(ctx, opts.RepoPath)
 	if err != nil {
@@ -158,12 +179,22 @@ func (a *App) Up(ctx context.Context, opts UpOptions) (TaskSummary, error) {
 	}
 	defer unlock()
 
-	ref, taskID, err := resolveManualTask(runtime.RepoRoot, opts.Task)
+	if err := a.ensureWorkflowTrusted(&runtime); err != nil {
+		return TaskSummary{}, err
+	}
+
+	ref, taskID, err := a.resolveTaskRef(ctx, runtime, opts.Task)
 	if err != nil {
 		return TaskSummary{}, err
 	}
 
 	if existing, err := a.state.Load(runtime.RepoID, taskID); err == nil {
+		if isLinearTask(existing) && strings.EqualFold(ref.Source, taskSourceLinear) {
+			if strings.TrimSpace(ref.Slug) == "" {
+				ref.Slug = existing.TaskRef.Slug
+			}
+			existing.TaskRef = ref
+		}
 		existing, discardable, err := a.recoverCreatingState(ctx, runtime, existing)
 		if err != nil {
 			return TaskSummary{}, err
@@ -178,6 +209,27 @@ func (a *App) Up(ctx context.Context, opts UpOptions) (TaskSummary, error) {
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return TaskSummary{}, err
+	}
+	if strings.EqualFold(ref.Source, taskSourceLinear) {
+		apiKey, _, err := a.resolveLinearCredential(runtime.EffectiveConfig.Linear)
+		if err != nil {
+			return TaskSummary{}, err
+		}
+		issue, err := a.linear.Issue(ctx, apiKey, ref.Key)
+		if err != nil {
+			return TaskSummary{}, err
+		}
+		if issue == nil {
+			return TaskSummary{}, fmt.Errorf("linear issue %q not found", ref.Key)
+		}
+		switch strings.ToLower(strings.TrimSpace(issue.State.Type)) {
+		case "completed", "canceled":
+			return TaskSummary{}, fmt.Errorf("linear issue %q is already %s", issue.Identifier, issue.State.Name)
+		}
+		ref, taskID, err = resolveLinearTask(runtime.RepoRoot, *issue)
+		if err != nil {
+			return TaskSummary{}, err
+		}
 	}
 
 	surface := opts.Surface
@@ -206,11 +258,6 @@ func (a *App) Up(ctx context.Context, opts UpOptions) (TaskSummary, error) {
 	}
 	if agentWindow := primaryAgentWindow(runtime.EffectiveConfig); agentWindow != nil {
 		state.PrimaryAgentWindow = agentWindow.Name
-	}
-
-	entries := workflowTrustEntries(runtime.Config)
-	if _, err := a.trust.EnsureTrusted(runtime.RepoID, runtime.RepoRoot, runtime.ConfigPath, runtime.WorkflowFingerprint, entries, a.stdin, a.stdout); err != nil {
-		return TaskSummary{}, err
 	}
 
 	worktreeRoot, err := resolveWorktreeRoot(runtime)
@@ -270,6 +317,9 @@ func (a *App) Up(ctx context.Context, opts UpOptions) (TaskSummary, error) {
 	if err := a.ensureTmux(ctx, runtime, state, true); err != nil {
 		return a.failState(state, err)
 	}
+	if err := a.startLinearIssueIfNeeded(ctx, runtime, &state); err != nil {
+		return a.failState(state, err)
+	}
 
 	state.Status = StatusReady
 	state.FailureReason = ""
@@ -277,18 +327,7 @@ func (a *App) Up(ctx context.Context, opts UpOptions) (TaskSummary, error) {
 	if err := a.state.Save(state); err != nil {
 		return TaskSummary{}, err
 	}
-
-	return TaskSummary{
-		TaskID:    state.TaskID,
-		TaskTitle: state.TaskRef.Title,
-		RepoRoot:  state.RepoRoot,
-		Worktree:  state.WorktreePath,
-		Branch:    state.Branch,
-		Session:   state.TmuxSession,
-		Surface:   state.Surface,
-		Status:    state.Status,
-		Delivery:  state.Delivery,
-	}, nil
+	return a.summaryForState(state), nil
 }
 
 func (a *App) reconcileExisting(ctx context.Context, runtime RuntimeConfig, state TaskState) (TaskSummary, error) {
@@ -303,24 +342,18 @@ func (a *App) reconcileExisting(ctx context.Context, runtime RuntimeConfig, stat
 	if err := a.ensureTmux(ctx, runtime, state, false); err != nil {
 		return a.failState(state, err)
 	}
+	if err := a.reconcileLinearTask(ctx, runtime, &state); err != nil {
+		return a.failState(state, err)
+	}
 	state.Status = StatusReady
 	state.FailureReason = ""
 	state.UpdatedAt = a.now()
 	if err := a.state.Save(state); err != nil {
 		return TaskSummary{}, err
 	}
-	return TaskSummary{
-		TaskID:      state.TaskID,
-		TaskTitle:   state.TaskRef.Title,
-		RepoRoot:    state.RepoRoot,
-		Worktree:    state.WorktreePath,
-		Branch:      state.Branch,
-		Session:     state.TmuxSession,
-		Surface:     state.Surface,
-		Status:      state.Status,
-		ConfigDrift: configDrift,
-		Delivery:    state.Delivery,
-	}, nil
+	summary := a.summaryForState(state)
+	summary.ConfigDrift = configDrift
+	return summary, nil
 }
 
 func (a *App) Attach(ctx context.Context, opts CommonOptions, task string) (TaskSummary, error) {
@@ -328,12 +361,7 @@ func (a *App) Attach(ctx context.Context, opts CommonOptions, task string) (Task
 	if err != nil {
 		return TaskSummary{}, err
 	}
-	ref, taskID, err := resolveManualTask(runtime.RepoRoot, task)
-	if err != nil {
-		return TaskSummary{}, err
-	}
-	_ = ref
-	state, err := a.state.Load(runtime.RepoID, taskID)
+	state, err := a.loadTaskByInput(ctx, runtime, task)
 	if err != nil {
 		return TaskSummary{}, err
 	}
@@ -343,17 +371,7 @@ func (a *App) Attach(ctx context.Context, opts CommonOptions, task string) (Task
 	if err := a.tmux.Attach(ctx, state.TmuxSession); err != nil {
 		return TaskSummary{}, err
 	}
-	return TaskSummary{
-		TaskID:    state.TaskID,
-		TaskTitle: state.TaskRef.Title,
-		RepoRoot:  state.RepoRoot,
-		Worktree:  state.WorktreePath,
-		Branch:    state.Branch,
-		Session:   state.TmuxSession,
-		Surface:   state.Surface,
-		Status:    state.Status,
-		Delivery:  state.Delivery,
-	}, nil
+	return a.summaryForState(state), nil
 }
 
 func (a *App) Codex(ctx context.Context, opts CommonOptions, task string) (TaskSummary, error) {
@@ -361,12 +379,7 @@ func (a *App) Codex(ctx context.Context, opts CommonOptions, task string) (TaskS
 	if err != nil {
 		return TaskSummary{}, err
 	}
-	ref, taskID, err := resolveManualTask(runtime.RepoRoot, task)
-	if err != nil {
-		return TaskSummary{}, err
-	}
-	_ = ref
-	state, err := a.state.Load(runtime.RepoID, taskID)
+	state, err := a.loadTaskByInput(ctx, runtime, task)
 	if err != nil {
 		return TaskSummary{}, err
 	}
@@ -382,17 +395,7 @@ func (a *App) Codex(ctx context.Context, opts CommonOptions, task string) (TaskS
 	if err := a.tmux.Attach(ctx, state.TmuxSession); err != nil {
 		return TaskSummary{}, err
 	}
-	return TaskSummary{
-		TaskID:    state.TaskID,
-		TaskTitle: state.TaskRef.Title,
-		RepoRoot:  state.RepoRoot,
-		Worktree:  state.WorktreePath,
-		Branch:    state.Branch,
-		Session:   state.TmuxSession,
-		Surface:   state.Surface,
-		Status:    state.Status,
-		Delivery:  state.Delivery,
-	}, nil
+	return a.summaryForState(state), nil
 }
 
 func (a *App) Verify(ctx context.Context, opts VerifyOptions, name string) (TaskSummary, error) {
@@ -408,12 +411,7 @@ func (a *App) runNamedCommand(ctx context.Context, opts VerifyOptions, name stri
 	if err != nil {
 		return TaskSummary{}, err
 	}
-	ref, taskID, err := resolveManualTask(runtime.RepoRoot, opts.Task)
-	if err != nil {
-		return TaskSummary{}, err
-	}
-	_ = ref
-	state, err := a.state.Load(runtime.RepoID, taskID)
+	state, err := a.loadTaskByInput(ctx, runtime, opts.Task)
 	if err != nil {
 		return TaskSummary{}, err
 	}
@@ -445,18 +443,9 @@ func (a *App) runNamedCommand(ctx context.Context, opts VerifyOptions, name stri
 	if err := a.state.Save(state); err != nil {
 		return TaskSummary{}, err
 	}
-	return TaskSummary{
-		TaskID:    state.TaskID,
-		TaskTitle: state.TaskRef.Title,
-		RepoRoot:  state.RepoRoot,
-		Worktree:  state.WorktreePath,
-		Branch:    state.Branch,
-		Session:   state.TmuxSession,
-		Surface:   state.Surface,
-		Status:    state.Status,
-		LogPath:   logPath,
-		Delivery:  state.Delivery,
-	}, nil
+	summary := a.summaryForState(state)
+	summary.LogPath = logPath
+	return summary, nil
 }
 
 func (a *App) Down(ctx context.Context, opts DownOptions) (TaskSummary, error) {
@@ -470,11 +459,7 @@ func (a *App) Down(ctx context.Context, opts DownOptions) (TaskSummary, error) {
 	}
 	defer unlock()
 
-	_, taskID, err := resolveManualTask(runtime.RepoRoot, opts.Task)
-	if err != nil {
-		return TaskSummary{}, err
-	}
-	state, err := a.state.Load(runtime.RepoID, taskID)
+	state, err := a.loadTaskByInput(ctx, runtime, opts.Task)
 	if err != nil {
 		return TaskSummary{}, err
 	}
@@ -487,17 +472,9 @@ func (a *App) Down(ctx context.Context, opts DownOptions) (TaskSummary, error) {
 			if err := a.state.Delete(state.RepoID, state.TaskID); err != nil {
 				return TaskSummary{}, err
 			}
-			return TaskSummary{
-				TaskID:    state.TaskID,
-				TaskTitle: state.TaskRef.Title,
-				RepoRoot:  state.RepoRoot,
-				Worktree:  state.WorktreePath,
-				Branch:    state.Branch,
-				Session:   state.TmuxSession,
-				Surface:   state.Surface,
-				Status:    "deleted",
-				Delivery:  state.Delivery,
-			}, nil
+			summary := a.summaryForState(state)
+			summary.Status = "deleted"
+			return summary, nil
 		}
 		fmt.Fprintf(a.stderr, "Resuming teardown for task %q after an interrupted create\n", state.TaskRef.Title)
 	}
@@ -563,17 +540,9 @@ func (a *App) Down(ctx context.Context, opts DownOptions) (TaskSummary, error) {
 	if err := a.state.Delete(state.RepoID, state.TaskID); err != nil {
 		return a.failState(state, err)
 	}
-	return TaskSummary{
-		TaskID:    state.TaskID,
-		TaskTitle: state.TaskRef.Title,
-		RepoRoot:  state.RepoRoot,
-		Worktree:  state.WorktreePath,
-		Branch:    state.Branch,
-		Session:   state.TmuxSession,
-		Surface:   state.Surface,
-		Status:    "deleted",
-		Delivery:  state.Delivery,
-	}, nil
+	summary := a.summaryForState(state)
+	summary.Status = "deleted"
+	return summary, nil
 }
 
 func (a *App) List(ctx context.Context, repoPath string) ([]TaskState, error) {
@@ -598,11 +567,7 @@ func (a *App) Repair(ctx context.Context, opts CommonOptions, task string) (Task
 	}
 	defer unlock()
 
-	_, taskID, err := resolveManualTask(runtime.RepoRoot, task)
-	if err != nil {
-		return TaskSummary{}, err
-	}
-	state, err := a.state.Load(runtime.RepoID, taskID)
+	state, err := a.loadTaskByInput(ctx, runtime, task)
 	if err != nil {
 		return TaskSummary{}, err
 	}
@@ -627,23 +592,16 @@ func (a *App) Repair(ctx context.Context, opts CommonOptions, task string) (Task
 	if err := a.ensureTmux(ctx, runtime, state, false); err != nil {
 		return a.failState(state, err)
 	}
+	if err := a.reconcileLinearTask(ctx, runtime, &state); err != nil {
+		return a.failState(state, err)
+	}
 	state.Status = StatusReady
 	state.FailureReason = ""
 	state.UpdatedAt = a.now()
 	if err := a.state.Save(state); err != nil {
 		return TaskSummary{}, err
 	}
-	return TaskSummary{
-		TaskID:    state.TaskID,
-		TaskTitle: state.TaskRef.Title,
-		RepoRoot:  state.RepoRoot,
-		Worktree:  state.WorktreePath,
-		Branch:    state.Branch,
-		Session:   state.TmuxSession,
-		Surface:   state.Surface,
-		Status:    state.Status,
-		Delivery:  state.Delivery,
-	}, nil
+	return a.summaryForState(state), nil
 }
 
 func (a *App) Doctor(ctx context.Context, opts DoctorOptions) ([]DoctorCheck, error) {
@@ -692,6 +650,24 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) ([]DoctorCheck, er
 	})
 
 	if runtimeLoaded {
+		if linearConfigured(runtime.EffectiveConfig.Linear) {
+			_, status, err := a.resolveLinearCredential(runtime.EffectiveConfig.Linear)
+			checks = append(checks, DoctorCheck{
+				Name:    "linear-credential",
+				OK:      status.Available,
+				Details: status.Source,
+			})
+			if err == nil && status.Available {
+				apiKey, _, _ := a.resolveLinearCredential(runtime.EffectiveConfig.Linear)
+				err := a.linear.Viewer(ctx, apiKey)
+				checks = append(checks, DoctorCheck{
+					Name:    "linear-auth",
+					OK:      err == nil,
+					Details: "Linear API viewer query",
+				})
+			}
+		}
+
 		if runtime.EffectiveConfig.GitHub.Enabled {
 			_, err := a.exec.Run(ctx, "", nil, "sh", "-lc", "command -v gh")
 			checks = append(checks, DoctorCheck{
@@ -750,17 +726,7 @@ func (a *App) failState(state TaskState, err error) (TaskSummary, error) {
 	state.FailureReason = err.Error()
 	state.UpdatedAt = a.now()
 	_ = a.state.Save(state)
-	return TaskSummary{
-		TaskID:    state.TaskID,
-		TaskTitle: state.TaskRef.Title,
-		RepoRoot:  state.RepoRoot,
-		Worktree:  state.WorktreePath,
-		Branch:    state.Branch,
-		Session:   state.TmuxSession,
-		Surface:   state.Surface,
-		Status:    state.Status,
-		Delivery:  state.Delivery,
-	}, err
+	return a.summaryForState(state), err
 }
 
 func resolveWorktreeRoot(runtime RuntimeConfig) (string, error) {

@@ -9,6 +9,17 @@ This file serves two roles:
 
 Repo config is authoritative for workflow behavior. If the file is missing, `agentflow up` will not invent tmux windows, agent commands, env targets, bootstrap commands, or verify/review commands for you.
 
+Task inputs can be:
+
+- manual titles such as `fix auth flow`
+- Linear issue keys such as `AF-123` when `[linear]` is configured
+- explicit `manual:...` and `linear:...` refs when disambiguation matters
+
+Linear credentials resolve in this order:
+
+1. the env var named by `linear.api_key_env` or `LINEAR_API_KEY`
+2. the stored credential written by `agentflow auth linear login`
+
 The only built-in defaults that remain are tool-owned mechanics:
 
 - default worktree root template: `{{agentflow_state_home}}/worktrees/{{repo_id}}`
@@ -176,6 +187,45 @@ Current supported values:
 - `merge_method`: `auto`, `squash`, `merge`, or `rebase`
 - `merge_method = "auto"` currently resolves to GitHub's regular merge mode when agentflow must choose a concrete strategy
 
+### `[linear]`
+
+Optional Linear issue integration for issue-backed task creation.
+
+Fields:
+
+- `api_key_env`
+- `team_keys`
+- `picker_scope`
+- `started_state`
+- `completed_state`
+
+Behavior:
+
+- when configured, `agentflow up` with no task opens a full-screen issue picker
+- bare issue keys such as `AF-123` resolve to Linear tasks
+- successful first-time `agentflow up` moves the issue into a started workflow state
+- `agentflow submit` links the PR back to the issue when a PR URL exists
+- `agentflow land`, `agentflow status`, and `agentflow gc` can mark merged work complete once agentflow observes the merge
+
+Credential workflow:
+
+- `agentflow auth linear login` validates and stores a reusable Linear API key
+- `agentflow auth linear status` shows whether resolution is using env or stored credentials
+- `agentflow auth linear logout` deletes the stored credential
+
+Current supported values:
+
+- `picker_scope`: `assigned` or `team`
+- `picker_scope = "assigned"` lists the viewer's assigned, non-completed issues
+- `picker_scope = "team"` requires `team_keys`
+
+Defaults:
+
+- `api_key_env`: `LINEAR_API_KEY`
+- `picker_scope`: `assigned`
+
+`started_state` and `completed_state` are optional workflow state names. If omitted, agentflow falls back to the first Linear workflow state with type `started` or `completed` for that issue's team.
+
 ### `[requirements]`
 
 Repo requirements checked by `agentflow doctor`.
@@ -196,6 +246,7 @@ Agentflow computes a workflow fingerprint from these sections:
 - `ports`
 - `delivery`
 - `github`
+- `linear`
 - `commands`
 - `agents`
 - `tmux`
@@ -213,6 +264,7 @@ The trust prompt is intentionally narrower than “all workflow config”. It sh
 - managed env files or port bindings it will write
 - branch sync and push behavior
 - GitHub PR operations when enabled
+- Linear issue reads and updates when enabled
 
 For `agentflow up`, trust is requested before the tool creates the task record, worktree, or tmux session. Declining or interrupting the trust prompt should not leave a new task behind.
 
@@ -251,6 +303,9 @@ remote = "origin"
 sync_strategy = "rebase"
 preflight = ["review", "verify"]
 cleanup = "async"
+
+[linear]
+api_key_env = "LINEAR_API_KEY"
 
 [commands]
 review = "go test ./..."

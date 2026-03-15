@@ -29,6 +29,7 @@ func defaultEffectiveConfig() EffectiveConfig {
 		},
 		Delivery:     DeliveryConfig{},
 		GitHub:       GitHubConfig{},
+		Linear:       LinearConfig{},
 		Requirements: RequirementsConfig{},
 	}
 }
@@ -94,6 +95,21 @@ func applyConfigFile(base EffectiveConfig, cfg ConfigFile) EffectiveConfig {
 	}
 	if len(cfg.GitHub.Reviewers) > 0 {
 		out.GitHub.Reviewers = append([]string(nil), cfg.GitHub.Reviewers...)
+	}
+	if cfg.Linear.APIKeyEnv != "" {
+		out.Linear.APIKeyEnv = cfg.Linear.APIKeyEnv
+	}
+	if len(cfg.Linear.TeamKeys) > 0 {
+		out.Linear.TeamKeys = append([]string(nil), cfg.Linear.TeamKeys...)
+	}
+	if cfg.Linear.PickerScope != "" {
+		out.Linear.PickerScope = cfg.Linear.PickerScope
+	}
+	if cfg.Linear.StartedState != "" {
+		out.Linear.StartedState = cfg.Linear.StartedState
+	}
+	if cfg.Linear.CompletedState != "" {
+		out.Linear.CompletedState = cfg.Linear.CompletedState
 	}
 	if len(cfg.Commands) > 0 {
 		if out.Commands == nil {
@@ -312,7 +328,44 @@ func validateEffectiveConfig(cfg EffectiveConfig) error {
 			return fmt.Errorf("github.merge_method must be one of auto, squash, merge, or rebase")
 		}
 	}
+	if linearConfigured(cfg.Linear) {
+		switch scope := effectiveLinearPickerScope(cfg.Linear); scope {
+		case "assigned", "team":
+		default:
+			return fmt.Errorf("linear.picker_scope must be one of assigned or team")
+		}
+		if effectiveLinearPickerScope(cfg.Linear) == "team" && len(cfg.Linear.TeamKeys) == 0 {
+			return errors.New("linear.team_keys must be configured when linear.picker_scope = \"team\"")
+		}
+		for _, key := range cfg.Linear.TeamKeys {
+			if strings.TrimSpace(key) == "" {
+				return errors.New("linear.team_keys must not contain empty entries")
+			}
+		}
+	}
 	return nil
+}
+
+func linearConfigured(cfg LinearConfig) bool {
+	return strings.TrimSpace(cfg.APIKeyEnv) != "" ||
+		len(cfg.TeamKeys) > 0 ||
+		strings.TrimSpace(cfg.PickerScope) != "" ||
+		strings.TrimSpace(cfg.StartedState) != "" ||
+		strings.TrimSpace(cfg.CompletedState) != ""
+}
+
+func effectiveLinearAPIKeyEnv(cfg LinearConfig) string {
+	if value := strings.TrimSpace(cfg.APIKeyEnv); value != "" {
+		return value
+	}
+	return "LINEAR_API_KEY"
+}
+
+func effectiveLinearPickerScope(cfg LinearConfig) string {
+	if value := strings.TrimSpace(cfg.PickerScope); value != "" {
+		return value
+	}
+	return "assigned"
 }
 
 func effectiveManagedEnvFiles(cfg EffectiveConfig) ([]string, error) {
@@ -340,6 +393,7 @@ type workflowConfig struct {
 	Ports     PortsConfig            `json:"ports"`
 	Delivery  DeliveryConfig         `json:"delivery"`
 	GitHub    GitHubConfig           `json:"github"`
+	Linear    LinearConfig           `json:"linear"`
 	Commands  map[string]string      `json:"commands"`
 	Agents    map[string]AgentConfig `json:"agents"`
 	Tmux      TmuxConfig             `json:"tmux"`
@@ -355,6 +409,7 @@ func workflowFingerprint(cfg ConfigFile) (string, error) {
 		Ports:     cfg.Ports,
 		Delivery:  cfg.Delivery,
 		GitHub:    cfg.GitHub,
+		Linear:    cfg.Linear,
 		Commands:  cfg.Commands,
 		Agents:    cfg.Agents,
 		Tmux:      cfg.Tmux,
@@ -382,6 +437,7 @@ func hasWorkflowConfig(cfg ConfigFile) bool {
 		cfg.GitHub.DeleteRemoteBranch ||
 		len(cfg.GitHub.Labels) > 0 ||
 		len(cfg.GitHub.Reviewers) > 0 ||
+		linearConfigured(cfg.Linear) ||
 		len(cfg.Commands) > 0 ||
 		len(cfg.Agents) > 0 ||
 		cfg.Tmux.SessionName != "" ||
@@ -435,6 +491,9 @@ func workflowTrustEntries(cfg ConfigFile) []string {
 	if cfg.GitHub.Enabled {
 		entries = append(entries, "create, inspect, and merge pull requests with gh")
 	}
+	if linearConfigured(cfg.Linear) {
+		entries = append(entries, fmt.Sprintf("read and update Linear issues using %s", effectiveLinearAPIKeyEnv(cfg.Linear)))
+	}
 	return uniqueStrings(entries)
 }
 
@@ -464,6 +523,7 @@ type renderConfig struct {
 	Ports        *renderPortsConfig           `toml:"ports,omitempty" json:"ports,omitempty"`
 	Delivery     *DeliveryConfig              `toml:"delivery,omitempty" json:"delivery,omitempty"`
 	GitHub       *GitHubConfig                `toml:"github,omitempty" json:"github,omitempty"`
+	Linear       *renderLinearConfig          `toml:"linear,omitempty" json:"linear,omitempty"`
 	Commands     map[string]string            `toml:"commands,omitempty" json:"commands,omitempty"`
 	Agents       map[string]renderAgentConfig `toml:"agents,omitempty" json:"agents,omitempty"`
 	Tmux         *renderTmuxConfig            `toml:"tmux,omitempty" json:"tmux,omitempty"`
@@ -499,6 +559,14 @@ type renderTmuxWindowConfig struct {
 type renderBootstrapConfig struct {
 	Commands []string         `toml:"commands,omitempty" json:"commands,omitempty"`
 	EnvFiles []EnvFileMapping `toml:"env_files,omitempty" json:"env_files,omitempty"`
+}
+
+type renderLinearConfig struct {
+	APIKeyEnv      string   `toml:"api_key_env,omitempty" json:"api_key_env,omitempty"`
+	TeamKeys       []string `toml:"team_keys,omitempty" json:"team_keys,omitempty"`
+	PickerScope    string   `toml:"picker_scope,omitempty" json:"picker_scope,omitempty"`
+	StartedState   string   `toml:"started_state,omitempty" json:"started_state,omitempty"`
+	CompletedState string   `toml:"completed_state,omitempty" json:"completed_state,omitempty"`
 }
 
 type renderPortsConfig struct {
@@ -565,6 +633,16 @@ func buildRenderableEffectiveConfig(cfg EffectiveConfig) renderConfig {
 	if cfg.GitHub.Enabled || cfg.GitHub.DraftOnSubmit || cfg.GitHub.MergeMethod != "" || cfg.GitHub.AutoMerge || cfg.GitHub.DeleteRemoteBranch || len(cfg.GitHub.Labels) > 0 || len(cfg.GitHub.Reviewers) > 0 {
 		github := cfg.GitHub
 		rendered.GitHub = &github
+	}
+	if linearConfigured(cfg.Linear) {
+		linear := renderLinearConfig{
+			APIKeyEnv:      effectiveLinearAPIKeyEnv(cfg.Linear),
+			TeamKeys:       cfg.Linear.TeamKeys,
+			PickerScope:    effectiveLinearPickerScope(cfg.Linear),
+			StartedState:   cfg.Linear.StartedState,
+			CompletedState: cfg.Linear.CompletedState,
+		}
+		rendered.Linear = &linear
 	}
 	if len(cfg.Commands) > 0 {
 		rendered.Commands = cfg.Commands

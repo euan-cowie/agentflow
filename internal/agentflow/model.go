@@ -49,6 +49,14 @@ type GitHubConfig struct {
 	Reviewers          []string `toml:"reviewers" json:"reviewers"`
 }
 
+type LinearConfig struct {
+	APIKeyEnv      string   `toml:"api_key_env" json:"api_key_env"`
+	TeamKeys       []string `toml:"team_keys" json:"team_keys"`
+	PickerScope    string   `toml:"picker_scope" json:"picker_scope"`
+	StartedState   string   `toml:"started_state" json:"started_state"`
+	CompletedState string   `toml:"completed_state" json:"completed_state"`
+}
+
 type PortBindingConfig struct {
 	Target string `toml:"target" json:"target"`
 	Key    string `toml:"key" json:"key"`
@@ -86,6 +94,7 @@ type ConfigFile struct {
 	Ports        PortsConfig            `toml:"ports" json:"ports"`
 	Delivery     DeliveryConfig         `toml:"delivery" json:"delivery"`
 	GitHub       GitHubConfig           `toml:"github" json:"github"`
+	Linear       LinearConfig           `toml:"linear" json:"linear"`
 	Commands     map[string]string      `toml:"commands" json:"commands"`
 	Agents       map[string]AgentConfig `toml:"agents" json:"agents"`
 	Tmux         TmuxConfig             `toml:"tmux" json:"tmux"`
@@ -120,6 +129,8 @@ type TaskRef struct {
 	Key    string `json:"key"`
 	Title  string `json:"title"`
 	Slug   string `json:"slug"`
+	ID     string `json:"id,omitempty"`
+	URL    string `json:"url,omitempty"`
 }
 
 type TaskState struct {
@@ -139,6 +150,7 @@ type TaskState struct {
 	PortBindings        []PortBindingState `json:"port_bindings,omitempty"`
 	ManagedEnvFiles     []string           `json:"managed_env_files,omitempty"`
 	WorkflowFingerprint string             `json:"workflow_fingerprint,omitempty"`
+	IssueState          string             `json:"issue_state,omitempty"`
 	Delivery            TaskDeliveryState  `json:"delivery,omitempty"`
 	CreatedAt           time.Time          `json:"created_at"`
 	UpdatedAt           time.Time          `json:"updated_at"`
@@ -176,6 +188,9 @@ type TaskSummary struct {
 	Status      string
 	ConfigDrift bool
 	LogPath     string
+	Issue       string
+	IssueURL    string
+	IssueState  string
 	Delivery    TaskDeliveryState
 	Dirty       bool
 	Ahead       int
@@ -195,6 +210,9 @@ type TaskStatus struct {
 	Status        string
 	FailureReason string
 	ConfigDrift   bool
+	Issue         string
+	IssueURL      string
+	IssueState    string
 	Delivery      TaskDeliveryState
 	Dirty         bool
 	Ahead         int

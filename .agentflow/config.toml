@@ -12,6 +12,9 @@ sync_strategy = "rebase"
 preflight = ["review", "verify"]
 cleanup = "async"
 
+[linear]
+api_key_env = "LINEAR_API_KEY"
+
 [commands]
 review = "go test ./..."
 verify_quick = "go test ./..."

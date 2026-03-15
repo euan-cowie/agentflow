@@ -29,6 +29,11 @@ func TestCLIHelpGolden(t *testing.T) {
 			args:   []string{"config", "--help"},
 			golden: "config-help.golden",
 		},
+		{
+			name:   "auth-help",
+			args:   []string{"auth", "--help"},
+			golden: "auth-help.golden",
+		},
 	}
 
 	for _, tc := range cases {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -336,6 +337,51 @@ func TestUpTrustDeclinedLeavesNoTaskState(t *testing.T) {
 	}
 }
 
+func TestUpDeclinedTrustDoesNotFetchLinearIssue(t *testing.T) {
+	repo := initCommittedRepo(t)
+	installFakeTmux(t)
+	writeTestRepoConfig(t, repo, testRepoWorkflowConfig+`
+
+[linear]
+api_key_env = "LINEAR_API_KEY"
+`)
+
+	stateRoot := t.TempDir()
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	exec := Executor{}
+	app := &App{
+		exec: exec,
+		git:  NewGitOps(exec),
+		gh:   NewGitHubOps(exec),
+		linear: newLinearTestOps(t, func(r *http.Request) (*http.Response, error) {
+			t.Fatalf("unexpected Linear request before trust: %s", r.URL.String())
+			return nil, nil
+		}),
+		tmux:   NewTmuxOps(exec),
+		runner: AgentRunner{},
+		state:  NewStateStore(stateRoot),
+		trust:  NewTrustStore(stateRoot),
+		creds:  NewCredentialStore(stateRoot),
+		stdin:  bytes.NewBufferString("no\n"),
+		stdout: stdout,
+		stderr: stderr,
+		now:    func() time.Time { return time.Now().UTC() },
+	}
+	t.Setenv("LINEAR_API_KEY", "test-token")
+
+	_, err := app.Up(context.Background(), UpOptions{
+		CommonOptions: CommonOptions{RepoPath: repo},
+		Task:          "AF-123",
+	})
+	if err == nil {
+		t.Fatal("expected trust decline to abort linear up")
+	}
+	if !strings.Contains(err.Error(), "repo trust declined") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestUpSavesStateBeforeCreatingWorktree(t *testing.T) {
 	repo := initCommittedRepo(t)
 	installFakeTmux(t)
@@ -536,6 +582,7 @@ func newTestApp(t *testing.T) (*App, *bytes.Buffer, *bytes.Buffer) {
 		runner: AgentRunner{},
 		state:  NewStateStore(stateRoot),
 		trust:  NewTrustStore(stateRoot),
+		creds:  NewCredentialStore(stateRoot),
 		stdin:  bytes.NewBufferString("yes\n"),
 		stdout: stdout,
 		stderr: stderr,

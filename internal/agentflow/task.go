@@ -11,7 +11,7 @@ func resolveManualTask(repoRoot, input string) (TaskRef, string, error) {
 		return TaskRef{}, "", fmt.Errorf("task must not be empty")
 	}
 	ref := TaskRef{
-		Source: "manual",
+		Source: taskSourceManual,
 		Key:    key,
 		Title:  strings.TrimSpace(input),
 		Slug:   slugify(key),
