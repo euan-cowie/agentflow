@@ -117,6 +117,7 @@ type ConfigOverview struct {
 type RuntimeConfig struct {
 	RepoRoot            string
 	RepoID              string
+	InvocationPath      string
 	ConfigPath          string
 	ConfigExists        bool
 	WorkflowFingerprint string

@@ -13,20 +13,20 @@
 
 - `agentflow up [task] [--surface ...] [--repo ...]`
 - `agentflow auth linear login|logout|status|list`
-- `agentflow attach <task>`
+- `agentflow attach [task]`
 - `agentflow status [task]`
-- `agentflow codex <task>`
+- `agentflow codex [task]`
 - `agentflow issues list`
-- `agentflow sync <task> [--all] [--push]`
-- `agentflow submit <task> [--draft|--ready]`
-- `agentflow land <task> [--watch]`
-- `agentflow verify <task> [--surface ...] [--foreground]`
-- `agentflow review <task> [--foreground]`
-- `agentflow down <task> [--delete-branch] [--force]`
+- `agentflow sync [task] [--all] [--push]`
+- `agentflow submit [task] [--draft|--ready]`
+- `agentflow land [task] [--watch]`
+- `agentflow verify [task] [--surface ...] [--foreground]`
+- `agentflow review [task] [--foreground]`
+- `agentflow down [task] [--delete-branch] [--force]`
 - `agentflow list [--verbose]`
 - `agentflow gc [task]`
 - `agentflow doctor`
-- `agentflow repair <task>`
+- `agentflow repair [task]`
 - `agentflow config`
 - `agentflow config path`
 - `agentflow config show`
@@ -176,6 +176,7 @@ The delivery layer sits on top of the existing task lifecycle:
 GitHub automation is optional. If `[github].enabled` is omitted or false, `submit` still pushes the branch but `land` will refuse to continue.
 When `[linear]` is configured, running `agentflow up` without a task opens a full-screen issue picker over your active Linear issues.
 `agentflow list` remains the local task list, while `agentflow issues list` shows the same ordered issue set that the `up` picker uses.
+Task-targeting commands such as `attach`, `codex`, `sync`, `submit`, `land`, `verify`, `review`, `down`, and `repair` can omit `[task]` when you run them inside that tracked task worktree. From the repo root, keep passing the explicit task.
 `agentflow down` accepts a tracked issue key like `TGG-132`, an explicit ref like `linear:TGG-132`, or an exact tracked task title; `--force` discards dirty worktree changes after a confirmation prompt.
 
 ## Notes

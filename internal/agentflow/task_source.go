@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -204,10 +205,70 @@ func (a *App) lookupTrackedTaskByTitle(runtime RuntimeConfig, title string) (Tas
 	return match.TaskRef, match.TaskID, true, nil
 }
 
+func (a *App) lookupTrackedTaskByPath(runtime RuntimeConfig, path string) (TaskState, bool, error) {
+	path = canonicalPath(path)
+	if strings.TrimSpace(path) == "" {
+		return TaskState{}, false, nil
+	}
+	states, err := a.state.List(runtime.RepoID)
+	if err != nil {
+		return TaskState{}, false, err
+	}
+	var match *TaskState
+	for idx := range states {
+		worktree := canonicalPath(states[idx].WorktreePath)
+		if worktree == "" || !pathWithin(worktree, path) {
+			continue
+		}
+		if match != nil && match.TaskID != states[idx].TaskID {
+			return TaskState{}, false, fmt.Errorf("current directory %q matches multiple tracked tasks; pass an explicit task", path)
+		}
+		match = &states[idx]
+	}
+	if match == nil {
+		return TaskState{}, false, nil
+	}
+	return *match, true, nil
+}
+
+func (a *App) trackedRepoRootForPath(path string) (string, bool, error) {
+	path = canonicalPath(path)
+	if strings.TrimSpace(path) == "" {
+		return "", false, nil
+	}
+	states, err := a.state.List("")
+	if err != nil {
+		return "", false, err
+	}
+	matchRoot := ""
+	for idx := range states {
+		worktree := canonicalPath(states[idx].WorktreePath)
+		if worktree == "" || !pathWithin(worktree, path) {
+			continue
+		}
+		repoRoot := canonicalPath(states[idx].RepoRoot)
+		if matchRoot != "" && matchRoot != repoRoot {
+			return "", false, fmt.Errorf("current directory %q matches tracked tasks from multiple repos; pass --repo explicitly", path)
+		}
+		matchRoot = repoRoot
+	}
+	if matchRoot == "" {
+		return "", false, nil
+	}
+	return matchRoot, true, nil
+}
+
 func (a *App) resolveTrackedTaskRef(runtime RuntimeConfig, input string) (TaskRef, string, bool, error) {
 	value := strings.TrimSpace(input)
 	if value == "" {
-		return TaskRef{}, "", false, fmt.Errorf("task must not be empty")
+		state, found, err := a.lookupTrackedTaskByPath(runtime, runtime.InvocationPath)
+		if err != nil {
+			return TaskRef{}, "", false, err
+		}
+		if !found {
+			return TaskRef{}, "", false, nil
+		}
+		return state.TaskRef, state.TaskID, true, nil
 	}
 
 	if source, explicitValue, ok := splitExplicitTaskSource(value); ok {
@@ -263,7 +324,10 @@ func (a *App) resolveTrackedTaskRef(runtime RuntimeConfig, input string) (TaskRe
 func (a *App) resolveTaskRef(ctx context.Context, runtime RuntimeConfig, input string) (TaskRef, string, error) {
 	value := strings.TrimSpace(input)
 	if value == "" {
-		return TaskRef{}, "", fmt.Errorf("task must not be empty")
+		if trackedRef, trackedTaskID, found, err := a.resolveTrackedTaskRef(runtime, value); found || err != nil {
+			return trackedRef, trackedTaskID, err
+		}
+		return TaskRef{}, "", fmt.Errorf("task argument is required unless you run this command inside a tracked task worktree")
 	}
 
 	if trackedRef, trackedTaskID, found, err := a.resolveTrackedTaskRef(runtime, value); found || err != nil {
@@ -332,6 +396,16 @@ func (a *App) resolveLinearTaskRef(ctx context.Context, runtime RuntimeConfig, i
 }
 
 func (a *App) loadTaskByInput(ctx context.Context, runtime RuntimeConfig, input string) (TaskState, error) {
+	if strings.TrimSpace(input) == "" {
+		state, found, err := a.lookupTrackedTaskByPath(runtime, runtime.InvocationPath)
+		if err != nil {
+			return TaskState{}, err
+		}
+		if !found {
+			return TaskState{}, fmt.Errorf("task argument is required unless you run this command inside a tracked task worktree")
+		}
+		return state, nil
+	}
 	_, taskID, found, err := a.resolveTrackedTaskRef(runtime, input)
 	if err != nil {
 		return TaskState{}, err
@@ -369,4 +443,14 @@ func taskLookupInput(state TaskState) string {
 		return state.TaskRef.Title
 	}
 	return strings.ToLower(strings.TrimSpace(state.TaskRef.Source)) + ":" + state.TaskRef.Key
+}
+
+func pathWithin(root, path string) bool {
+	root = canonicalPath(root)
+	path = canonicalPath(path)
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
 }

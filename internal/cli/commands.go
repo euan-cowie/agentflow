@@ -52,11 +52,15 @@ func upCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
 
 func attachCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
 	return &cobra.Command{
-		Use:   "attach <task>",
+		Use:   "attach [task]",
 		Short: "Attach to the tmux session for a task",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			summary, err := app().Attach(cmd.Context(), agentflow.CommonOptions{RepoPath: *repoPath}, args[0])
+			task := ""
+			if len(args) == 1 {
+				task = args[0]
+			}
+			summary, err := app().Attach(cmd.Context(), agentflow.CommonOptions{RepoPath: *repoPath}, task)
 			if err != nil {
 				return err
 			}
@@ -88,11 +92,15 @@ func statusCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
 
 func codexCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
 	return &cobra.Command{
-		Use:   "codex <task>",
+		Use:   "codex [task]",
 		Short: "Jump to the primary Codex window for a task",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			summary, err := app().Codex(cmd.Context(), agentflow.CommonOptions{RepoPath: *repoPath}, args[0])
+			task := ""
+			if len(args) == 1 {
+				task = args[0]
+			}
+			summary, err := app().Codex(cmd.Context(), agentflow.CommonOptions{RepoPath: *repoPath}, task)
 			if err != nil {
 				return err
 			}
@@ -106,7 +114,7 @@ func syncCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
 	var all bool
 	var push bool
 	cmd := &cobra.Command{
-		Use:   "sync <task>",
+		Use:   "sync [task]",
 		Short: "Sync one or more task branches with the repo base branch",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if all {
@@ -115,7 +123,7 @@ func syncCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
 				}
 				return nil
 			}
-			return cobra.ExactArgs(1)(cmd, args)
+			return cobra.MaximumNArgs(1)(cmd, args)
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			task := ""
@@ -144,13 +152,17 @@ func submitCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
 	var draft bool
 	var ready bool
 	cmd := &cobra.Command{
-		Use:   "submit <task>",
+		Use:   "submit [task]",
 		Short: "Push a task branch and create or reuse a pull request",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			task := ""
+			if len(args) == 1 {
+				task = args[0]
+			}
 			summary, err := app().Submit(cmd.Context(), agentflow.SubmitOptions{
 				CommonOptions: agentflow.CommonOptions{RepoPath: *repoPath},
-				Task:          args[0],
+				Task:          task,
 				Draft:         draft,
 				Ready:         ready,
 			})
@@ -169,13 +181,17 @@ func submitCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
 func landCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
 	var watch bool
 	cmd := &cobra.Command{
-		Use:   "land <task>",
+		Use:   "land [task]",
 		Short: "Run preflight checks and enable merge for a task pull request",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			task := ""
+			if len(args) == 1 {
+				task = args[0]
+			}
 			summary, err := app().Land(cmd.Context(), agentflow.LandOptions{
 				CommonOptions: agentflow.CommonOptions{RepoPath: *repoPath},
-				Task:          args[0],
+				Task:          task,
 				Watch:         watch,
 			})
 			if err != nil {
@@ -216,13 +232,17 @@ func verifyCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
 	var surface string
 	var foreground bool
 	cmd := &cobra.Command{
-		Use:   "verify <task>",
+		Use:   "verify [task]",
 		Short: "Run the configured verify command for a task",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			task := ""
+			if len(args) == 1 {
+				task = args[0]
+			}
 			summary, err := app().Verify(cmd.Context(), agentflow.VerifyOptions{
 				CommonOptions: agentflow.CommonOptions{RepoPath: *repoPath},
-				Task:          args[0],
+				Task:          task,
 				Surface:       surface,
 				Foreground:    foreground,
 			}, "verify")
@@ -241,13 +261,17 @@ func verifyCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
 func reviewCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
 	var foreground bool
 	cmd := &cobra.Command{
-		Use:   "review <task>",
+		Use:   "review [task]",
 		Short: "Run the configured review command for a task",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			task := ""
+			if len(args) == 1 {
+				task = args[0]
+			}
 			summary, err := app().Review(cmd.Context(), agentflow.VerifyOptions{
 				CommonOptions: agentflow.CommonOptions{RepoPath: *repoPath},
-				Task:          args[0],
+				Task:          task,
 				Foreground:    foreground,
 			})
 			if err != nil {
@@ -265,18 +289,23 @@ func downCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
 	var deleteBranch bool
 	var force bool
 	cmd := &cobra.Command{
-		Use:   "down <task>",
+		Use:   "down [task]",
 		Short: "Tear down a tracked task worktree and session",
 		Long: "Tear down a tracked task worktree and session.\n\n" +
-			"<task> can be a Linear issue key like TGG-132, an explicit source ref like linear:TGG-132 or manual:fix auth flow, or the exact tracked task title.",
+			"[task] can be a Linear issue key like TGG-132, an explicit source ref like linear:TGG-132 or manual:fix auth flow, the exact tracked task title, or omitted while running inside that tracked task worktree.",
 		Example: "  agentflow down TGG-132\n" +
 			"  agentflow down linear:TGG-132\n" +
-			"  agentflow down \"fix auth flow\"",
-		Args: cobra.ExactArgs(1),
+			"  agentflow down \"fix auth flow\"\n" +
+			"  agentflow down",
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			task := ""
+			if len(args) == 1 {
+				task = args[0]
+			}
 			summary, err := app().Down(cmd.Context(), agentflow.DownOptions{
 				CommonOptions: agentflow.CommonOptions{RepoPath: *repoPath},
-				Task:          args[0],
+				Task:          task,
 				DeleteBranch:  deleteBranch,
 				Force:         force,
 			})
@@ -366,11 +395,15 @@ func doctorCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
 
 func repairCommand(app func() *agentflow.App, repoPath *string) *cobra.Command {
 	return &cobra.Command{
-		Use:   "repair <task>",
+		Use:   "repair [task]",
 		Short: "Repair drift between task state, worktree metadata, and tmux",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			summary, err := app().Repair(cmd.Context(), agentflow.CommonOptions{RepoPath: *repoPath}, args[0])
+			task := ""
+			if len(args) == 1 {
+				task = args[0]
+			}
+			summary, err := app().Repair(cmd.Context(), agentflow.CommonOptions{RepoPath: *repoPath}, task)
 			if err != nil {
 				return err
 			}

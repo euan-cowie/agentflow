@@ -15,6 +15,8 @@ Task inputs can be:
 - Linear issue keys such as `AF-123` when `[linear]` is configured
 - explicit `manual:...` and `linear:...` refs when disambiguation matters
 
+For task-targeting commands such as `attach`, `codex`, `sync`, `submit`, `land`, `verify`, `review`, `down`, and `repair`, the task argument can be omitted when the command is run inside that tracked task worktree. From the repo root, pass the task explicitly.
+
 Linear credentials resolve in this order:
 
 1. the env var named by `linear.api_key_env` or `LINEAR_API_KEY`

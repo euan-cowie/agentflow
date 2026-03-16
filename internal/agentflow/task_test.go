@@ -3,6 +3,8 @@ package agentflow
 import (
 	"context"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -268,5 +270,105 @@ func TestLoadTaskByInputResolvesMovedLinearIssueByStableID(t *testing.T) {
 	}
 	if loaded.TaskRef.ID != "issue-1" {
 		t.Fatalf("expected stable issue id to be preserved, got %+v", loaded.TaskRef)
+	}
+}
+
+func TestLoadTaskByInputInfersTrackedTaskFromInvocationPath(t *testing.T) {
+	t.Parallel()
+
+	app, _, _ := newTestApp(t)
+	repoRoot := "/tmp/example-repo"
+	worktree := "/tmp/state/worktrees/example/fix-auth-flow-123456"
+	ref, id, err := resolveManualTask(repoRoot, "fix auth flow")
+	if err != nil {
+		t.Fatalf("resolveManualTask returned error: %v", err)
+	}
+	state := TaskState{
+		TaskID:       id,
+		TaskRef:      ref,
+		RepoRoot:     repoRoot,
+		RepoID:       repoID(repoRoot),
+		WorktreePath: worktree,
+	}
+	if err := app.state.Save(state); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	runtime := RuntimeConfig{
+		RepoRoot:       repoRoot,
+		RepoID:         repoID(repoRoot),
+		InvocationPath: filepath.Join(worktree, "apps", "web"),
+	}
+
+	loaded, err := app.loadTaskByInput(context.Background(), runtime, "")
+	if err != nil {
+		t.Fatalf("loadTaskByInput returned error: %v", err)
+	}
+	if loaded.TaskID != id {
+		t.Fatalf("expected inferred task id %q, got %q", id, loaded.TaskID)
+	}
+}
+
+func TestLoadTaskByInputRequiresTaskOutsideTrackedWorktree(t *testing.T) {
+	t.Parallel()
+
+	app, _, _ := newTestApp(t)
+	runtime := RuntimeConfig{
+		RepoRoot:       "/tmp/example-repo",
+		RepoID:         repoID("/tmp/example-repo"),
+		InvocationPath: "/tmp/example-repo",
+	}
+
+	_, err := app.loadTaskByInput(context.Background(), runtime, "")
+	if err == nil {
+		t.Fatal("expected missing-task error")
+	}
+	if err.Error() != "task argument is required unless you run this command inside a tracked task worktree" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadRuntimeUsesTrackedRepoRootWhenInvokedInsideTaskWorktree(t *testing.T) {
+	repo := initCommittedRepo(t)
+	installFakeTmux(t)
+	writeTestRepoConfig(t, repo, testRepoWorkflowConfig)
+
+	app, _, _ := newTestApp(t)
+	t.Setenv("AGENTFLOW_STATE_HOME", app.state.root)
+	summary, err := app.Up(context.Background(), UpOptions{
+		CommonOptions: CommonOptions{RepoPath: repo},
+		Task:          "runtime normalization",
+	})
+	if err != nil {
+		t.Fatalf("Up returned error: %v", err)
+	}
+
+	nested := filepath.Join(summary.Worktree, "nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested worktree dir: %v", err)
+	}
+	originalWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(originalWD)
+	}()
+	if err := os.Chdir(nested); err != nil {
+		t.Fatalf("chdir nested worktree: %v", err)
+	}
+
+	runtime, err := app.loadRuntime(context.Background(), "")
+	if err != nil {
+		t.Fatalf("loadRuntime returned error: %v", err)
+	}
+	if runtime.RepoRoot != canonicalPath(repo) {
+		t.Fatalf("expected canonical repo root %q, got %q", canonicalPath(repo), runtime.RepoRoot)
+	}
+	if runtime.RepoID != repoID(canonicalPath(repo)) {
+		t.Fatalf("expected canonical repo id %q, got %q", repoID(canonicalPath(repo)), runtime.RepoID)
+	}
+	if runtime.InvocationPath != canonicalPath(nested) {
+		t.Fatalf("expected invocation path %q, got %q", canonicalPath(nested), runtime.InvocationPath)
 	}
 }

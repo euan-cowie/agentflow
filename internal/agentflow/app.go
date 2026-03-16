@@ -105,15 +105,11 @@ func NewApp(stdin io.Reader, stdout, stderr io.Writer) (*App, error) {
 }
 
 func (a *App) resolveRepoRoot(ctx context.Context, repoArg string) (string, error) {
-	base := repoArg
-	if base == "" {
-		var err error
-		base, err = os.Getwd()
-		if err != nil {
-			return "", err
-		}
+	base, err := a.resolveInvocationPath(repoArg)
+	if err != nil {
+		return "", err
 	}
-	root, err := a.git.RepoRoot(ctx, base)
+	root, err := a.resolveRepoRootForPath(ctx, base)
 	if err != nil {
 		return "", fmt.Errorf("resolve repo root from %s: %w", base, err)
 	}
@@ -121,7 +117,11 @@ func (a *App) resolveRepoRoot(ctx context.Context, repoArg string) (string, erro
 }
 
 func (a *App) loadRuntime(ctx context.Context, repoArg string) (RuntimeConfig, error) {
-	repoRoot, err := a.resolveRepoRoot(ctx, repoArg)
+	invocationPath, err := a.resolveInvocationPath(repoArg)
+	if err != nil {
+		return RuntimeConfig{}, err
+	}
+	repoRoot, err := a.resolveRepoRootForPath(ctx, invocationPath)
 	if err != nil {
 		return RuntimeConfig{}, err
 	}
@@ -129,11 +129,39 @@ func (a *App) loadRuntime(ctx context.Context, repoArg string) (RuntimeConfig, e
 	if err != nil {
 		return RuntimeConfig{}, err
 	}
+	runtime.InvocationPath = invocationPath
 	trusted, err := a.trust.IsTrusted(runtime.RepoID, runtime.RepoRoot, runtime.WorkflowFingerprint)
 	if err == nil {
 		runtime.Trusted = trusted
 	}
 	return runtime, err
+}
+
+func (a *App) resolveInvocationPath(repoArg string) (string, error) {
+	base := repoArg
+	if strings.TrimSpace(base) == "" {
+		var err error
+		base, err = os.Getwd()
+		if err != nil {
+			return "", err
+		}
+	}
+	return canonicalPath(base), nil
+}
+
+func (a *App) resolveRepoRootForPath(ctx context.Context, path string) (string, error) {
+	if repoRoot, ok, err := a.trackedRepoRootForPath(path); ok || err != nil {
+		return repoRoot, err
+	}
+	root, err := a.git.RepoRoot(ctx, path)
+	if err != nil {
+		return "", err
+	}
+	root = canonicalPath(root)
+	if repoRoot, ok, err := a.trackedRepoRootForPath(root); ok || err != nil {
+		return repoRoot, err
+	}
+	return root, nil
 }
 
 func (a *App) lockRepo(runtime RuntimeConfig) (func(), error) {
