@@ -320,10 +320,14 @@ func (a *App) Up(ctx context.Context, opts UpOptions) (TaskSummary, error) {
 		return a.failState(state, err)
 	}
 
-	if err := a.ensureTmux(ctx, runtime, &state, true); err != nil {
+	scaffold, err := a.ensureTmuxScaffold(ctx, &runtime, &state, true)
+	if err != nil {
 		return a.failState(state, err)
 	}
 	if err := a.startLinearIssueIfNeeded(ctx, runtime, &state); err != nil {
+		return a.failState(state, err)
+	}
+	if err := a.launchAgentWindows(ctx, runtime, &state, scaffold.AgentWindows, false); err != nil {
 		return a.failState(state, err)
 	}
 
@@ -345,10 +349,14 @@ func (a *App) reconcileExisting(ctx context.Context, runtime RuntimeConfig, stat
 	if err := syncManagedEnvFiles(state); err != nil {
 		return a.failState(state, err)
 	}
-	if err := a.ensureTmux(ctx, runtime, &state, false); err != nil {
+	scaffold, err := a.ensureTmuxScaffold(ctx, &runtime, &state, false)
+	if err != nil {
 		return a.failState(state, err)
 	}
 	if err := a.reconcileLinearTask(ctx, runtime, &state); err != nil {
+		return a.failState(state, err)
+	}
+	if err := a.launchAgentWindows(ctx, runtime, &state, scaffold.AgentWindows, true); err != nil {
 		return a.failState(state, err)
 	}
 	state.Status = StatusReady
@@ -611,9 +619,6 @@ func (a *App) Repair(ctx context.Context, opts CommonOptions, task string) (Task
 	if err := a.ensureTmux(ctx, runtime, &state, false); err != nil {
 		return a.failState(state, err)
 	}
-	if err := a.reconcileLinearTask(ctx, runtime, &state); err != nil {
-		return a.failState(state, err)
-	}
 	state.Status = StatusReady
 	state.FailureReason = ""
 	state.UpdatedAt = a.now()
@@ -740,6 +745,12 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) ([]DoctorCheck, er
 			}
 		}
 
+		checks = append(checks, DoctorCheck{
+			Name:    "advice:bootstrap",
+			OK:      true,
+			Details: bootstrapDoctorDetails(runtime),
+		})
+
 		for _, server := range runtime.Config.Requirements.MCPServers {
 			result, err := a.exec.Run(ctx, "", nil, "codex", "mcp", "list", "--json")
 			ok := err == nil && strings.Contains(result.Stdout, server)
@@ -771,6 +782,25 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) ([]DoctorCheck, er
 	}
 
 	return checks, nil
+}
+
+func bootstrapDoctorDetails(runtime RuntimeConfig) string {
+	if len(runtime.EffectiveConfig.Bootstrap.Commands) > 0 {
+		return "bootstrap commands configured"
+	}
+	if lockfile := detectedBootstrapLockfile(runtime.RepoRoot); lockfile != "" {
+		return fmt.Sprintf("%s detected with no [bootstrap].commands; add repo bootstrap commands so new worktrees install dependencies before agents start", lockfile)
+	}
+	return "no bootstrap advisory"
+}
+
+func detectedBootstrapLockfile(repoRoot string) string {
+	for _, name := range []string{"bun.lock", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"} {
+		if fileExists(filepath.Join(repoRoot, name)) {
+			return name
+		}
+	}
+	return ""
 }
 
 func syncManagedEnvFiles(state TaskState) error {
@@ -902,24 +932,44 @@ func (a *App) runBootstrap(ctx context.Context, runtime RuntimeConfig, state Tas
 	return nil
 }
 
+type tmuxScaffoldResult struct {
+	AgentWindows []TmuxWindowConfig
+}
+
 func (a *App) ensureTmux(ctx context.Context, runtime RuntimeConfig, state *TaskState, firstCreate bool) error {
-	if err := a.git.ValidateTaskWorktree(ctx, *state); err != nil {
+	scaffold, err := a.ensureTmuxScaffold(ctx, &runtime, state, firstCreate)
+	if err != nil {
 		return err
+	}
+	if len(scaffold.AgentWindows) == 0 {
+		return nil
+	}
+	if err := a.refreshLinearIssueSnapshotForTmux(ctx, runtime, state, firstCreate); err != nil {
+		fmt.Fprintf(a.stderr, "Warning: continuing without refreshed Linear context for %q: %v\n", state.TaskRef.Title, err)
+	}
+	return a.launchAgentWindows(ctx, runtime, state, scaffold.AgentWindows, !firstCreate)
+}
+
+func (a *App) ensureTmuxScaffold(ctx context.Context, runtime *RuntimeConfig, state *TaskState, firstCreate bool) (tmuxScaffoldResult, error) {
+	if err := a.git.ValidateTaskWorktree(ctx, *state); err != nil {
+		return tmuxScaffoldResult{}, err
 	}
 	sessionExists := a.tmux.HasSession(ctx, state.TmuxSession)
 	windows := runtime.EffectiveConfig.Tmux.Windows
 	if len(windows) == 0 {
 		if sessionExists {
-			return nil
+			return tmuxScaffoldResult{}, nil
 		}
-		return fmt.Errorf("tmux.windows must be configured in %s", runtime.ConfigPath)
+		return tmuxScaffoldResult{}, fmt.Errorf("tmux.windows must be configured in %s", runtime.ConfigPath)
 	}
+	windowExists := make(map[string]bool, len(windows))
 	needCreate := !sessionExists
 	if sessionExists {
 		for _, window := range windows {
-			if !a.tmux.WindowExists(ctx, state.TmuxSession, window.Name) {
+			exists := a.tmux.WindowExists(ctx, state.TmuxSession, window.Name)
+			windowExists[window.Name] = exists
+			if !exists {
 				needCreate = true
-				break
 			}
 		}
 	}
@@ -927,46 +977,50 @@ func (a *App) ensureTmux(ctx context.Context, runtime RuntimeConfig, state *Task
 		entries := workflowTrustEntries(runtime.Config)
 		trusted, err := a.trust.EnsureTrusted(runtime.RepoID, runtime.RepoRoot, runtime.ConfigPath, runtime.WorkflowFingerprint, entries, a.stdin, a.stdout)
 		if err != nil {
-			return err
+			return tmuxScaffoldResult{}, err
 		}
 		runtime.Trusted = trusted
 	}
-	if needCreate {
-		if err := a.refreshLinearIssueSnapshotForTmux(ctx, runtime, state, firstCreate); err != nil {
-			fmt.Fprintf(a.stderr, "Warning: continuing without refreshed Linear context for %q: %v\n", state.TaskRef.Title, err)
-		}
-	}
 
+	result := tmuxScaffoldResult{}
 	for idx, window := range windows {
-		command, err := a.windowCommand(runtime.EffectiveConfig, *state, window, sessionExists && a.tmux.WindowExists(ctx, state.TmuxSession, window.Name))
-		if err != nil {
-			return err
+		exists := sessionExists && windowExists[window.Name]
+		command := ""
+		if window.Agent != "" {
+			if !exists || firstCreate {
+				result.AgentWindows = append(result.AgentWindows, window)
+			}
+		} else {
+			var err error
+			command, err = a.windowCommand(runtime.EffectiveConfig, *state, window, false)
+			if err != nil {
+				return tmuxScaffoldResult{}, err
+			}
 		}
+
 		if !sessionExists && idx == 0 {
 			if err := a.tmux.NewSession(ctx, state.TmuxSession, state.WorktreePath, window, command); err != nil {
-				return err
+				return tmuxScaffoldResult{}, err
 			}
 			sessionExists = true
+			windowExists[window.Name] = true
 			continue
 		}
-		if !sessionExists || !a.tmux.WindowExists(ctx, state.TmuxSession, window.Name) {
-			if window.Agent != "" && !sessionExists {
-				if err := a.tmux.NewSession(ctx, state.TmuxSession, state.WorktreePath, window, command); err != nil {
-					return err
-				}
-				sessionExists = true
-				continue
-			}
+
+		if !exists {
 			if err := a.tmux.AddWindow(ctx, state.TmuxSession, state.WorktreePath, window, command); err != nil {
-				return err
+				return tmuxScaffoldResult{}, err
 			}
-		} else if firstCreate && window.Agent != "" {
-			if err := a.tmux.RespawnWindow(ctx, state.TmuxSession, state.WorktreePath, window, command); err != nil {
-				return err
+			windowExists[window.Name] = true
+			continue
+		}
+		if firstCreate && window.Agent != "" {
+			if err := a.tmux.RespawnWindow(ctx, state.TmuxSession, state.WorktreePath, window, ""); err != nil {
+				return tmuxScaffoldResult{}, err
 			}
 		}
 	}
-	return nil
+	return result, nil
 }
 
 func (a *App) refreshLinearIssueSnapshotForTmux(ctx context.Context, runtime RuntimeConfig, state *TaskState, firstCreate bool) error {
@@ -989,7 +1043,20 @@ func (a *App) refreshLinearIssueSnapshotForTmux(ctx context.Context, runtime Run
 	return nil
 }
 
-func (a *App) windowCommand(cfg EffectiveConfig, state TaskState, window TmuxWindowConfig, exists bool) (string, error) {
+func (a *App) launchAgentWindows(ctx context.Context, runtime RuntimeConfig, state *TaskState, windows []TmuxWindowConfig, resume bool) error {
+	for _, window := range windows {
+		command, err := a.windowCommand(runtime.EffectiveConfig, *state, window, resume)
+		if err != nil {
+			return err
+		}
+		if err := a.tmux.SendKeys(ctx, state.TmuxSession, window.Name, command); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *App) windowCommand(cfg EffectiveConfig, state TaskState, window TmuxWindowConfig, resume bool) (string, error) {
 	if window.Command != "" {
 		return shellCommandWithEnv(window.Command, taskEnv(state)), nil
 	}
@@ -998,11 +1065,11 @@ func (a *App) windowCommand(cfg EffectiveConfig, state TaskState, window TmuxWin
 		agent.Runner = "codex"
 	}
 	prompt := strings.TrimSpace(agent.PrimePrompt)
-	if exists && agent.ResumePrompt != "" {
+	if resume && agent.ResumePrompt != "" {
 		prompt = agent.ResumePrompt
 	}
-	contextPrompt := buildAgentContextPrompt(prompt, state)
-	command, err := a.runner.commandString(agent, state.WorktreePath, contextPrompt, exists)
+	contextPrompt := buildAgentContextPrompt(cfg, prompt, state)
+	command, err := a.runner.commandString(agent, state.WorktreePath, contextPrompt, resume)
 	if err != nil {
 		return "", err
 	}

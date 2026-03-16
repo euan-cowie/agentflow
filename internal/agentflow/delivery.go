@@ -3,7 +3,6 @@ package agentflow
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"strings"
 	"time"
 )
@@ -576,8 +575,60 @@ func linearTaskSnapshotChanged(before, after TaskState) bool {
 		after.TaskRef.URL != before.TaskRef.URL ||
 		after.TaskRef.ID != before.TaskRef.ID ||
 		after.IssueState != before.IssueState ||
-		!reflect.DeepEqual(after.IssueContext, before.IssueContext) ||
+		!linearIssueContextEqual(after.IssueContext, before.IssueContext) ||
 		after.Delivery != before.Delivery
+}
+
+func linearIssueContextEqual(after, before *LinearIssueContext) bool {
+	normalizedAfter := normalizeLinearIssueContext(after)
+	normalizedBefore := normalizeLinearIssueContext(before)
+	if normalizedAfter == nil || normalizedBefore == nil {
+		return normalizedAfter == nil && normalizedBefore == nil
+	}
+	return normalizedAfter.TeamName == normalizedBefore.TeamName &&
+		normalizedAfter.TeamKey == normalizedBefore.TeamKey &&
+		normalizedAfter.Description == normalizedBefore.Description &&
+		stringSlicesEqual(normalizedAfter.Labels, normalizedBefore.Labels) &&
+		linearIssueCommentsEqual(normalizedAfter.Comments, normalizedBefore.Comments) &&
+		normalizedAfter.HasMoreComments == normalizedBefore.HasMoreComments &&
+		linearIssueAttachmentsEqual(normalizedAfter.Attachments, normalizedBefore.Attachments) &&
+		normalizedAfter.HasMoreAttachments == normalizedBefore.HasMoreAttachments
+}
+
+func stringSlicesEqual(after, before []string) bool {
+	if len(after) != len(before) {
+		return false
+	}
+	for idx := range after {
+		if after[idx] != before[idx] {
+			return false
+		}
+	}
+	return true
+}
+
+func linearIssueCommentsEqual(after, before []LinearIssueComment) bool {
+	if len(after) != len(before) {
+		return false
+	}
+	for idx := range after {
+		if after[idx] != before[idx] {
+			return false
+		}
+	}
+	return true
+}
+
+func linearIssueAttachmentsEqual(after, before []LinearIssueAttachment) bool {
+	if len(after) != len(before) {
+		return false
+	}
+	for idx := range after {
+		if after[idx] != before[idx] {
+			return false
+		}
+	}
+	return true
 }
 
 func requiredDeliveryRemote(runtime RuntimeConfig) (string, error) {

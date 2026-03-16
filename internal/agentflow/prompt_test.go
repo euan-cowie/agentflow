@@ -7,10 +7,18 @@ import (
 )
 
 func TestBuildAgentContextPromptIncludesLinearIssueContext(t *testing.T) {
+	cfg := defaultEffectiveConfig()
+	cfg.Repo.DefaultSurface = "web"
+	cfg.Commands = map[string]string{
+		"review":       "bun run review",
+		"verify_web":   "bun run verify:web",
+		"verify_quick": "bun run verify:quick",
+	}
 	state := TaskState{
 		TaskID:       "task-123",
 		TaskRef:      TaskRef{Source: taskSourceLinear, Key: "TGG-139", Title: "TGG-139 Implement Copy Bullet Points", URL: "https://linear.app/example/issue/TGG-139"},
 		WorktreePath: "/tmp/worktree",
+		Surface:      "web",
 		IssueState:   "In Review",
 		IssueContext: &LinearIssueContext{
 			TeamName:           "Grassroots gateway",
@@ -40,9 +48,13 @@ func TestBuildAgentContextPromptIncludesLinearIssueContext(t *testing.T) {
 		},
 	}
 
-	prompt := buildAgentContextPrompt("Read AGENTS.md first.", state)
+	prompt := buildAgentContextPrompt(cfg, "Read AGENTS.md first.", state)
 	for _, want := range []string{
 		"Read AGENTS.md first.",
+		"Workflow:",
+		"Surface: web",
+		"Verify (verify_web): bun run verify:web",
+		"Review: bun run review",
 		"Linear Issue:",
 		"Key: TGG-139",
 		"URL: https://linear.app/example/issue/TGG-139",

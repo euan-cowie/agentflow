@@ -86,7 +86,9 @@ func (l LinearOps) issue(ctx context.Context, apiKey, lookup string) (*LinearIss
 		Issue *linearIssueNode `json:"issue"`
 	}
 	resp, err := linearQuery[responseData](ctx, l, apiKey, linearIssueQuery, map[string]any{
-		"id": lookup,
+		"id":               lookup,
+		"commentsFirst":    linearPromptCommentLimit,
+		"attachmentsFirst": linearPromptAttachmentLimit,
 	})
 	if err != nil {
 		return nil, err
@@ -94,7 +96,11 @@ func (l LinearOps) issue(ctx context.Context, apiKey, lookup string) (*LinearIss
 	if resp.Issue == nil {
 		return nil, nil
 	}
-	issue := resp.Issue.toIssue()
+	comments, hasMoreComments, err := l.collectTopLevelComments(ctx, apiKey, strings.TrimSpace(resp.Issue.ID), resp.Issue.Comments)
+	if err != nil {
+		return nil, err
+	}
+	issue := resp.Issue.toIssue(comments, hasMoreComments)
 	return &issue, nil
 }
 
@@ -203,44 +209,6 @@ mutation IssueUpdate($id: String!, $stateId: String!) {
     success
     issue {
       id
-      identifier
-      title
-      url
-      updatedAt
-      description
-      team { id key name }
-      state { id name type }
-      labels(first: 20) {
-        nodes {
-          name
-        }
-      }
-      comments(first: 50) {
-        pageInfo {
-          hasNextPage
-        }
-        nodes {
-          id
-          body
-          createdAt
-          url
-          user { name }
-          parent { id }
-        }
-      }
-      attachments(first: 20) {
-        pageInfo {
-          hasNextPage
-        }
-        nodes {
-          id
-          title
-          subtitle
-          url
-          sourceType
-          createdAt
-        }
-      }
     }
   }
 }
@@ -254,7 +222,14 @@ mutation IssueUpdate($id: String!, $stateId: String!) {
 	if !resp.IssueUpdate.Success || resp.IssueUpdate.Issue == nil {
 		return LinearIssue{}, errorsNew("linear issue update did not succeed")
 	}
-	return resp.IssueUpdate.Issue.toIssue(), nil
+	refreshed, err := l.IssueByID(ctx, apiKey, issue.ID)
+	if err != nil {
+		return LinearIssue{}, err
+	}
+	if refreshed == nil {
+		return LinearIssue{}, fmt.Errorf("linear issue %q not found after transition", issue.Identifier)
+	}
+	return *refreshed, nil
 }
 
 func (l LinearOps) EnsureAttachment(ctx context.Context, apiKey, issueID, title, subtitle, url string) error {
@@ -379,7 +354,7 @@ func linearQuery[T any](ctx context.Context, l LinearOps, apiKey, query string, 
 func linearIssuesFromNodes(nodes []linearIssueNode, sortMode string) []LinearIssue {
 	out := make([]LinearIssue, 0, len(nodes))
 	for _, node := range nodes {
-		out = append(out, node.toIssue())
+		out = append(out, node.toIssue(nil, false))
 	}
 	switch sortMode {
 	case "linear":
@@ -439,37 +414,46 @@ type linearIssueNode struct {
 			Name string `json:"name"`
 		} `json:"nodes"`
 	} `json:"labels"`
-	Comments struct {
-		PageInfo struct {
-			HasNextPage bool `json:"hasNextPage"`
-		} `json:"pageInfo"`
-		Nodes []struct {
-			ID        string               `json:"id"`
-			Body      string               `json:"body"`
-			URL       string               `json:"url"`
-			CreatedAt time.Time            `json:"createdAt"`
-			User      *linearCommentAuthor `json:"user"`
-			Parent    *struct {
-				ID string `json:"id"`
-			} `json:"parent"`
-		} `json:"nodes"`
-	} `json:"comments"`
-	Attachments struct {
-		PageInfo struct {
-			HasNextPage bool `json:"hasNextPage"`
-		} `json:"pageInfo"`
-		Nodes []struct {
-			ID         string    `json:"id"`
-			Title      string    `json:"title"`
-			Subtitle   string    `json:"subtitle"`
-			URL        string    `json:"url"`
-			SourceType string    `json:"sourceType"`
-			CreatedAt  time.Time `json:"createdAt"`
-		} `json:"nodes"`
-	} `json:"attachments"`
+	Comments    linearCommentConnection    `json:"comments"`
+	Attachments linearAttachmentConnection `json:"attachments"`
 }
 
-func (n linearIssueNode) toIssue() LinearIssue {
+type linearPageInfo struct {
+	HasNextPage bool   `json:"hasNextPage"`
+	EndCursor   string `json:"endCursor"`
+}
+
+type linearCommentNode struct {
+	ID        string               `json:"id"`
+	Body      string               `json:"body"`
+	URL       string               `json:"url"`
+	CreatedAt time.Time            `json:"createdAt"`
+	User      *linearCommentAuthor `json:"user"`
+	Parent    *struct {
+		ID string `json:"id"`
+	} `json:"parent"`
+}
+
+type linearCommentConnection struct {
+	PageInfo linearPageInfo      `json:"pageInfo"`
+	Nodes    []linearCommentNode `json:"nodes"`
+}
+
+type linearAttachmentNode struct {
+	ID         string    `json:"id"`
+	Title      string    `json:"title"`
+	Subtitle   string    `json:"subtitle"`
+	URL        string    `json:"url"`
+	SourceType string    `json:"sourceType"`
+	CreatedAt  time.Time `json:"createdAt"`
+}
+
+type linearAttachmentConnection struct {
+	PageInfo linearPageInfo         `json:"pageInfo"`
+	Nodes    []linearAttachmentNode `json:"nodes"`
+}
+
+func (n linearIssueNode) toIssue(comments []LinearIssueComment, hasMoreComments bool) LinearIssue {
 	labels := make([]string, 0, len(n.Labels.Nodes))
 	for _, label := range n.Labels.Nodes {
 		name := strings.TrimSpace(label.Name)
@@ -478,37 +462,6 @@ func (n linearIssueNode) toIssue() LinearIssue {
 		}
 	}
 	slices.Sort(labels)
-
-	comments := make([]LinearIssueComment, 0, len(n.Comments.Nodes))
-	for _, comment := range n.Comments.Nodes {
-		if comment.Parent != nil {
-			continue
-		}
-		body := strings.TrimSpace(comment.Body)
-		if body == "" {
-			continue
-		}
-		author := ""
-		if comment.User != nil {
-			author = strings.TrimSpace(comment.User.Name)
-		}
-		comments = append(comments, LinearIssueComment{
-			ID:        strings.TrimSpace(comment.ID),
-			Author:    author,
-			Body:      body,
-			URL:       strings.TrimSpace(comment.URL),
-			CreatedAt: comment.CreatedAt,
-		})
-	}
-	slices.SortFunc(comments, func(a, b LinearIssueComment) int {
-		if !a.CreatedAt.Equal(b.CreatedAt) {
-			if a.CreatedAt.Before(b.CreatedAt) {
-				return -1
-			}
-			return 1
-		}
-		return strings.Compare(a.ID, b.ID)
-	})
 
 	attachments := make([]LinearIssueAttachment, 0, len(n.Attachments.Nodes))
 	for _, attachment := range n.Attachments.Nodes {
@@ -539,17 +492,99 @@ func (n linearIssueNode) toIssue() LinearIssue {
 		UpdatedAt:  n.UpdatedAt,
 		Team:       n.Team,
 		State:      n.State,
-		Context: LinearIssueContext{
+		Context: normalizeLinearIssueContextValue(LinearIssueContext{
 			TeamName:           strings.TrimSpace(n.Team.Name),
 			TeamKey:            strings.TrimSpace(n.Team.Key),
 			Description:        strings.TrimSpace(n.Description),
 			Labels:             labels,
 			Comments:           comments,
-			HasMoreComments:    n.Comments.PageInfo.HasNextPage,
+			HasMoreComments:    hasMoreComments,
 			Attachments:        attachments,
 			HasMoreAttachments: n.Attachments.PageInfo.HasNextPage,
-		},
+		}),
 	}
+}
+
+func (l LinearOps) collectTopLevelComments(ctx context.Context, apiKey, issueID string, firstPage linearCommentConnection) ([]LinearIssueComment, bool, error) {
+	comments := topLevelLinearComments(firstPage.Nodes)
+	pageInfo := firstPage.PageInfo
+	hasMoreComments := len(comments) > linearPromptCommentLimit
+	if len(comments) > linearPromptCommentLimit {
+		comments = comments[:linearPromptCommentLimit]
+	}
+
+	for len(comments) < linearPromptCommentLimit && pageInfo.HasNextPage {
+		page, err := l.issueCommentsPage(ctx, apiKey, issueID, strings.TrimSpace(pageInfo.EndCursor))
+		if err != nil {
+			return nil, false, err
+		}
+		pageComments := topLevelLinearComments(page.Nodes)
+		comments = append(comments, pageComments...)
+		pageInfo = page.PageInfo
+		if len(comments) > linearPromptCommentLimit {
+			hasMoreComments = true
+			comments = comments[:linearPromptCommentLimit]
+			break
+		}
+	}
+	if pageInfo.HasNextPage {
+		hasMoreComments = true
+	}
+	slices.SortFunc(comments, func(a, b LinearIssueComment) int {
+		if !a.CreatedAt.Equal(b.CreatedAt) {
+			if a.CreatedAt.Before(b.CreatedAt) {
+				return -1
+			}
+			return 1
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+	return comments, hasMoreComments, nil
+}
+
+func topLevelLinearComments(nodes []linearCommentNode) []LinearIssueComment {
+	comments := make([]LinearIssueComment, 0, len(nodes))
+	for _, comment := range nodes {
+		if comment.Parent != nil {
+			continue
+		}
+		body := strings.TrimSpace(comment.Body)
+		if body == "" {
+			continue
+		}
+		author := ""
+		if comment.User != nil {
+			author = strings.TrimSpace(comment.User.Name)
+		}
+		comments = append(comments, LinearIssueComment{
+			ID:        strings.TrimSpace(comment.ID),
+			Author:    author,
+			Body:      body,
+			URL:       strings.TrimSpace(comment.URL),
+			CreatedAt: comment.CreatedAt,
+		})
+	}
+	return comments
+}
+
+func (l LinearOps) issueCommentsPage(ctx context.Context, apiKey, issueID, after string) (linearCommentConnection, error) {
+	type responseData struct {
+		Issue *struct {
+			Comments linearCommentConnection `json:"comments"`
+		} `json:"issue"`
+	}
+	resp, err := linearQuery[responseData](ctx, l, apiKey, linearIssueCommentsPageQuery, map[string]any{
+		"id":    issueID,
+		"after": after,
+		"first": linearPromptCommentLimit,
+	})
+	if err != nil {
+		return linearCommentConnection{}, err
+	}
+	if resp.Issue == nil {
+		return linearCommentConnection{}, errorsNew("linear issue query returned no issue")
+	}
+	return resp.Issue.Comments, nil
 }
 
 func linearIssueStateRank(stateType string) int {
@@ -580,7 +615,7 @@ func uniqueUpperStrings(values []string) []string {
 }
 
 const linearIssueQuery = `
-query Issue($id: String!) {
+query Issue($id: String!, $commentsFirst: Int!, $attachmentsFirst: Int!) {
   issue(id: $id) {
     id
     identifier
@@ -595,9 +630,10 @@ query Issue($id: String!) {
         name
       }
     }
-    comments(first: 50) {
+    comments(first: $commentsFirst) {
       pageInfo {
         hasNextPage
+        endCursor
       }
       nodes {
         id
@@ -608,9 +644,10 @@ query Issue($id: String!) {
         parent { id }
       }
     }
-    attachments(first: 20) {
+    attachments(first: $attachmentsFirst) {
       pageInfo {
         hasNextPage
+        endCursor
       }
       nodes {
         id
@@ -624,6 +661,104 @@ query Issue($id: String!) {
   }
 }
 `
+
+const linearIssueCommentsPageQuery = `
+query IssueCommentsPage($id: String!, $first: Int!, $after: String!) {
+  issue(id: $id) {
+    comments(first: $first, after: $after) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        id
+        body
+        createdAt
+        url
+        user { name }
+        parent { id }
+      }
+    }
+  }
+}
+`
+
+func normalizeLinearIssueContextValue(ctx LinearIssueContext) LinearIssueContext {
+	ctx.TeamName = strings.TrimSpace(ctx.TeamName)
+	ctx.TeamKey = strings.TrimSpace(ctx.TeamKey)
+	ctx.Description = strings.TrimSpace(ctx.Description)
+	ctx.Labels = normalizeStringSlice(ctx.Labels)
+	ctx.Comments = normalizeLinearIssueComments(ctx.Comments)
+	ctx.Attachments = normalizeLinearIssueAttachments(ctx.Attachments)
+	return ctx
+}
+
+func normalizeLinearIssueContext(ctx *LinearIssueContext) *LinearIssueContext {
+	if ctx == nil {
+		return nil
+	}
+	normalized := normalizeLinearIssueContextValue(*ctx)
+	return &normalized
+}
+
+func normalizeStringSlice(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeLinearIssueComments(values []LinearIssueComment) []LinearIssueComment {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]LinearIssueComment, 0, len(values))
+	for _, value := range values {
+		value.ID = strings.TrimSpace(value.ID)
+		value.Author = strings.TrimSpace(value.Author)
+		value.Body = strings.TrimSpace(value.Body)
+		value.URL = strings.TrimSpace(value.URL)
+		if value.ID == "" && value.Author == "" && value.Body == "" && value.URL == "" && value.CreatedAt.IsZero() {
+			continue
+		}
+		out = append(out, value)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeLinearIssueAttachments(values []LinearIssueAttachment) []LinearIssueAttachment {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]LinearIssueAttachment, 0, len(values))
+	for _, value := range values {
+		value.ID = strings.TrimSpace(value.ID)
+		value.Title = strings.TrimSpace(value.Title)
+		value.Subtitle = strings.TrimSpace(value.Subtitle)
+		value.URL = strings.TrimSpace(value.URL)
+		value.SourceType = strings.TrimSpace(value.SourceType)
+		if value.ID == "" && value.Title == "" && value.Subtitle == "" && value.URL == "" && value.SourceType == "" && value.CreatedAt.IsZero() {
+			continue
+		}
+		out = append(out, value)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
 
 func errorsNew(message string) error {
 	return fmt.Errorf("%s", message)

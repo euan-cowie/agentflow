@@ -181,5 +181,5 @@ func (a *App) applyLinearIssue(state *TaskState, issue LinearIssue) {
 		}
 	}
 	state.IssueState = strings.TrimSpace(issue.State.Name)
-	state.IssueContext = &issue.Context
+	state.IssueContext = normalizeLinearIssueContext(&issue.Context)
 }

@@ -51,8 +51,20 @@ func (t TmuxOps) WindowExists(ctx context.Context, session, name string) bool {
 
 func (t TmuxOps) RespawnWindow(ctx context.Context, session, cwd string, window TmuxWindowConfig, command string) error {
 	target := fmt.Sprintf("%s:%s", session, window.Name)
-	args := []string{"respawn-window", "-k", "-t", target, "-c", cwd, "sh", "-lc", command}
+	args := []string{"respawn-window", "-k", "-t", target, "-c", cwd}
+	if command != "" {
+		args = append(args, "sh", "-lc", command)
+	}
 	_, err := t.exec.Run(ctx, "", nil, "tmux", args...)
+	return err
+}
+
+func (t TmuxOps) SendKeys(ctx context.Context, session, name, command string) error {
+	target := fmt.Sprintf("%s:%s", session, name)
+	if _, err := t.exec.Run(ctx, "", nil, "tmux", "send-keys", "-t", target, "-l", command); err != nil {
+		return err
+	}
+	_, err := t.exec.Run(ctx, "", nil, "tmux", "send-keys", "-t", target, "C-m")
 	return err
 }
 

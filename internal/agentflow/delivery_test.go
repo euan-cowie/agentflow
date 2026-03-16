@@ -535,6 +535,30 @@ api_key_env = "LINEAR_API_KEY"
 	}
 }
 
+func TestLinearTaskSnapshotChangedTreatsEmptyIssueContextSlicesAsEqual(t *testing.T) {
+	t.Parallel()
+
+	before := TaskState{
+		IssueState: "Todo",
+		IssueContext: &LinearIssueContext{
+			Description: "No labels or comments",
+		},
+	}
+	after := TaskState{
+		IssueState: "Todo",
+		IssueContext: &LinearIssueContext{
+			Description: "No labels or comments",
+			Labels:      []string{},
+			Comments:    []LinearIssueComment{},
+			Attachments: []LinearIssueAttachment{},
+		},
+	}
+
+	if linearTaskSnapshotChanged(before, after) {
+		t.Fatalf("expected nil and empty issue-context slices to compare equal: before=%+v after=%+v", before.IssueContext, after.IssueContext)
+	}
+}
+
 func TestSyncConflictPersistsGuidance(t *testing.T) {
 	repo, _ := initCommittedRepoWithRemote(t)
 	installFakeTmux(t)
@@ -1142,6 +1166,12 @@ api_key_env = "LINEAR_API_KEY"
 			if variables["id"] != "issue-1" {
 				t.Fatalf("expected issue lookup by stable issue id, got %+v", variables)
 			}
+			stateName := "In Progress"
+			stateType := "started"
+			if issueUpdateCalls > 0 {
+				stateName = "Done"
+				stateType = "completed"
+			}
 			return linearHTTPResponse(t, map[string]any{
 				"data": map[string]any{
 					"issue": map[string]any{
@@ -1150,7 +1180,7 @@ api_key_env = "LINEAR_API_KEY"
 						"title":      "Fix auth flow",
 						"url":        "https://linear.app/example/issue/AF-123",
 						"team":       map[string]any{"id": "team-1", "key": "AF", "name": "Agentflow"},
-						"state":      map[string]any{"id": "state-1", "name": "In Progress", "type": "started"},
+						"state":      map[string]any{"id": "state-1", "name": stateName, "type": stateType},
 					},
 				},
 			}), nil

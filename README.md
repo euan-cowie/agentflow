@@ -119,8 +119,8 @@ verify_web = "bun run verify:web"
 [agents.default]
 runner = "codex"
 command = "codex --no-alt-screen -s workspace-write -a on-request"
-prime_prompt = "Read AGENTS.md and any relevant repo instructions, then wait for my next instruction."
-resume_prompt = "Resume the task, re-check local instructions if the repo changed, then wait for my next instruction."
+prime_prompt = "Read AGENTS.md and any relevant repo instructions, inspect the task context and relevant files, identify the likely verification path for the current surface, send a short status update with your plan, then wait for confirmation before editing."
+resume_prompt = "Resume the task, re-check local instructions if needed, inspect the current task state and recent changes, send a short status update with your next-step plan, then wait for confirmation before editing."
 
 [tmux]
 session_name = "{{repo}}-{{task}}-{{id}}"
@@ -158,7 +158,8 @@ Important behavior note:
 
 - `prime_prompt` is sent to Codex when `agentflow up` creates the agent window
 - `resume_prompt` is sent if agentflow later recreates or resumes that window
-- agentflow appends task context before launch, so a non-empty prompt will usually cause Codex to start working immediately
+- agentflow appends workflow context, Linear issue context when available, and task/worktree context before launch
+- a proactive prompt should make Codex inspect and plan first, not start editing blindly
 - `agentflow attach` only reconnects to the tmux session that `up` already started
 
 ## Async delivery flow
@@ -194,6 +195,7 @@ When `[linear]` is configured, running `agentflow up` without a task opens a ful
 - `linear.issue_sort` controls the default ordering shared by `agentflow up` and `agentflow issues list`; the default is `state_then_updated`.
 - `agentflow auth linear login --profile <name>` stores a reusable named Linear API key locally for repos that pin `[linear].credential_profile`.
 - `agentflow auth linear list` shows the stored legacy credential plus any named Linear profiles.
-- `agentflow doctor` reports GitHub merge policy details and warns when merge-queue repos need CI coverage for `merge_group` or `gh-readonly-queue/*` refs.
+- `agentflow doctor` reports GitHub merge policy details, warns when merge-queue repos need CI coverage for `merge_group` or `gh-readonly-queue/*` refs, and advises dependency-managed repos to configure `[bootstrap].commands` when a JS lockfile is present.
+- repos with dependency lockfiles should declare `[bootstrap].commands` so new task worktrees land in a ready-to-run environment.
 - Runtime workflow does not fall back to implicit tmux windows or agent commands; declare them explicitly in `.agentflow/config.toml`.
 - Repo-local Codex guidance for CLI/docs sync lives in [AGENTS.md](/Users/euan-cowie/Projects/agentflow/AGENTS.md) and [.agentflow/skills/cli-doc-sync/SKILL.md](/Users/euan-cowie/Projects/agentflow/.agentflow/skills/cli-doc-sync/SKILL.md).

@@ -41,16 +41,40 @@ func (a *App) confirmForceDown(state TaskState) error {
 	return nil
 }
 
-func buildAgentContextPrompt(basePrompt string, state TaskState) string {
-	parts := make([]string, 0, 3)
+func buildAgentContextPrompt(cfg EffectiveConfig, basePrompt string, state TaskState) string {
+	parts := make([]string, 0, 4)
 	if prompt := strings.TrimSpace(basePrompt); prompt != "" {
 		parts = append(parts, prompt)
+	}
+	if workflow := formatWorkflowPrompt(cfg, state); workflow != "" {
+		parts = append(parts, workflow)
 	}
 	if issueContext := formatLinearIssuePrompt(state); issueContext != "" {
 		parts = append(parts, issueContext)
 	}
 	parts = append(parts, fmt.Sprintf("Task: %s\nTask ID: %s\nWorktree: %s", state.TaskRef.Title, state.TaskID, state.WorktreePath))
 	return strings.Join(parts, "\n\n")
+}
+
+func formatWorkflowPrompt(cfg EffectiveConfig, state TaskState) string {
+	lines := []string{"Workflow:"}
+	surface := strings.TrimSpace(state.Surface)
+	if surface == "" {
+		surface = strings.TrimSpace(cfg.Repo.DefaultSurface)
+	}
+	if surface != "" {
+		lines = append(lines, "Surface: "+surface)
+	}
+	if verifyCommand, verifyName, err := resolveCommand(cfg, state, "verify", ""); err == nil {
+		lines = append(lines, fmt.Sprintf("Verify (%s): %s", verifyName, verifyCommand))
+	}
+	if reviewCommand := strings.TrimSpace(cfg.Commands["review"]); reviewCommand != "" {
+		lines = append(lines, "Review: "+reviewCommand)
+	}
+	if len(lines) == 1 {
+		return ""
+	}
+	return strings.Join(lines, "\n")
 }
 
 func formatLinearIssuePrompt(state TaskState) string {

@@ -731,6 +731,9 @@ name = %q
 base_branch = "origin/main"
 default_surface = "default"
 
+# [bootstrap]
+# commands = ["bun install --frozen-lockfile"]
+
 [env]
 targets = [{ path = ".env.agentflow" }]
 
@@ -747,8 +750,8 @@ verify_quick = "make test"
 [agents.default]
 runner = "codex"
 command = "codex --no-alt-screen -s workspace-write -a on-request"
-prime_prompt = "Read AGENTS.md and any relevant repo instructions, then wait for my next instruction."
-resume_prompt = "Resume the current task, re-check local instructions if the repo changed, then wait for my next instruction."
+prime_prompt = "Read AGENTS.md and any relevant repo instructions, inspect the task context and relevant files, identify the likely verification path for the current surface, send a short status update with your plan, then wait for confirmation before editing."
+resume_prompt = "Resume the current task, re-check AGENTS.md and local instructions if needed, inspect the current task state and recent changes, send a short status update with your next-step plan, then wait for confirmation before editing."
 
 [tmux]
 session_name = "{{repo}}-{{task}}-{{id}}"

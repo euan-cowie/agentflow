@@ -869,6 +869,224 @@ api_key_env = "LINEAR_API_KEY"
 	}
 }
 
+func TestUpLaunchesAgentWithStartedLinearState(t *testing.T) {
+	repo := initCommittedRepo(t)
+	logPath := filepath.Join(t.TempDir(), "tmux.log")
+	installRecordingTmux(t, logPath)
+	writeTestRepoConfig(t, repo, testRepoWorkflowConfig+`
+
+[linear]
+api_key_env = "LINEAR_API_KEY"
+`)
+
+	app, _, _ := newTestApp(t)
+	issueQueryCount := 0
+	app.linear = newLinearTestOps(t, func(r *http.Request) (*http.Response, error) {
+		payload := readLinearPayload(t, r.Body)
+		query := payload["query"].(string)
+		switch {
+		case strings.Contains(query, "query WorkflowStates"):
+			return linearHTTPResponse(t, map[string]any{
+				"data": map[string]any{
+					"workflowStates": map[string]any{
+						"nodes": []map[string]any{
+							{"id": "state-1", "name": "Todo", "type": "unstarted"},
+							{"id": "state-2", "name": "In Progress", "type": "started"},
+						},
+					},
+				},
+			}), nil
+		case strings.Contains(query, "mutation IssueUpdate"):
+			return linearHTTPResponse(t, map[string]any{
+				"data": map[string]any{
+					"issueUpdate": map[string]any{
+						"success": true,
+						"issue":   map[string]any{"id": "issue-1"},
+					},
+				},
+			}), nil
+		case strings.Contains(query, "query Issue("):
+			issueQueryCount++
+			stateName := "Todo"
+			stateType := "unstarted"
+			if issueQueryCount > 1 {
+				stateName = "In Progress"
+				stateType = "started"
+			}
+			return linearHTTPResponse(t, map[string]any{
+				"data": map[string]any{
+					"issue": map[string]any{
+						"id":         "issue-1",
+						"identifier": "AF-123",
+						"title":      "Fix auth flow",
+						"url":        "https://linear.app/example/issue/AF-123",
+						"updatedAt":  "2026-03-15T10:00:00Z",
+						"team":       map[string]any{"id": "team-1", "key": "AF", "name": "Agentflow"},
+						"state":      map[string]any{"id": "state-1", "name": stateName, "type": stateType},
+					},
+				},
+			}), nil
+		default:
+			t.Fatalf("unexpected query: %s", query)
+			return nil, nil
+		}
+	})
+	t.Setenv("LINEAR_API_KEY", "test-token")
+	t.Setenv("AGENTFLOW_STATE_HOME", app.state.root)
+
+	if _, err := app.Up(context.Background(), UpOptions{
+		CommonOptions: CommonOptions{RepoPath: repo},
+		Task:          "AF-123",
+	}); err != nil {
+		t.Fatalf("Up returned error: %v", err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read tmux log: %v", err)
+	}
+	logData := string(logBytes)
+	if !strings.Contains(logData, "State: In Progress") {
+		t.Fatalf("expected codex launch to include the started Linear state, log=%q", logData)
+	}
+	if strings.Contains(logData, "State: Todo") {
+		t.Fatalf("did not expect codex launch to include the stale unstarted state, log=%q", logData)
+	}
+}
+
+func TestReconcileExistingLaunchesAgentWithCompletedLinearState(t *testing.T) {
+	repo := initCommittedRepo(t)
+	logPath := filepath.Join(t.TempDir(), "tmux.log")
+	installRecordingTmux(t, logPath)
+	writeTestRepoConfig(t, repo, testRepoWorkflowConfig+`
+
+[linear]
+api_key_env = "LINEAR_API_KEY"
+`)
+
+	ctx := context.Background()
+	exec := Executor{}
+	git := NewGitOps(exec)
+	repoRoot, err := git.RepoRoot(ctx, repo)
+	if err != nil {
+		t.Fatalf("RepoRoot returned error: %v", err)
+	}
+	repoRoot, err = filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks returned error: %v", err)
+	}
+	ref, taskID, err := resolveLinearTask(repoRoot, LinearIssue{
+		ID:         "issue-1",
+		Identifier: "AF-123",
+		Title:      "Fix auth flow",
+		URL:        "https://linear.app/example/issue/AF-123",
+	})
+	if err != nil {
+		t.Fatalf("resolveLinearTask returned error: %v", err)
+	}
+
+	cfg := defaultEffectiveConfig()
+	cfg.Repo.Name = filepath.Base(repo)
+	branch := branchName(cfg, ref, taskID)
+	worktree := filepath.Join(t.TempDir(), ref.Slug+"-"+taskID[:6])
+	if err := git.CreateWorktree(ctx, repo, branch, worktree, "main"); err != nil {
+		t.Fatalf("CreateWorktree returned error: %v", err)
+	}
+
+	app, _, _ := newTestApp(t)
+	issueQueryCount := 0
+	app.linear = newLinearTestOps(t, func(r *http.Request) (*http.Response, error) {
+		payload := readLinearPayload(t, r.Body)
+		query := payload["query"].(string)
+		switch {
+		case strings.Contains(query, "query WorkflowStates"):
+			return linearHTTPResponse(t, map[string]any{
+				"data": map[string]any{
+					"workflowStates": map[string]any{
+						"nodes": []map[string]any{
+							{"id": "state-1", "name": "In Review", "type": "started"},
+							{"id": "state-2", "name": "Done", "type": "completed"},
+						},
+					},
+				},
+			}), nil
+		case strings.Contains(query, "mutation IssueUpdate"):
+			return linearHTTPResponse(t, map[string]any{
+				"data": map[string]any{
+					"issueUpdate": map[string]any{
+						"success": true,
+						"issue":   map[string]any{"id": "issue-1"},
+					},
+				},
+			}), nil
+		case strings.Contains(query, "query Issue("):
+			issueQueryCount++
+			stateName := "In Review"
+			stateType := "started"
+			if issueQueryCount > 1 {
+				stateName = "Done"
+				stateType = "completed"
+			}
+			return linearHTTPResponse(t, map[string]any{
+				"data": map[string]any{
+					"issue": map[string]any{
+						"id":         "issue-1",
+						"identifier": "AF-123",
+						"title":      "Fix auth flow",
+						"url":        "https://linear.app/example/issue/AF-123",
+						"updatedAt":  "2026-03-15T10:00:00Z",
+						"team":       map[string]any{"id": "team-1", "key": "AF", "name": "Agentflow"},
+						"state":      map[string]any{"id": "state-1", "name": stateName, "type": stateType},
+					},
+				},
+			}), nil
+		default:
+			t.Fatalf("unexpected query: %s", query)
+			return nil, nil
+		}
+	})
+	t.Setenv("LINEAR_API_KEY", "test-token")
+
+	runtime, err := app.loadRuntime(ctx, repo)
+	if err != nil {
+		t.Fatalf("loadRuntime returned error: %v", err)
+	}
+	now := time.Now().UTC()
+	state := TaskState{
+		TaskID:       taskID,
+		TaskRef:      ref,
+		Status:       StatusReady,
+		RepoRoot:     repoRoot,
+		RepoID:       repoID(repoRoot),
+		WorktreePath: worktree,
+		Branch:       branch,
+		BaseBranch:   "main",
+		Surface:      runtime.EffectiveConfig.Repo.DefaultSurface,
+		TmuxSession:  renderSessionName(runtime.EffectiveConfig, ref, taskID),
+		Delivery: TaskDeliveryState{
+			State: DeliveryStateMerged,
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	if _, err := app.reconcileExisting(ctx, runtime, state); err != nil {
+		t.Fatalf("reconcileExisting returned error: %v", err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read tmux log: %v", err)
+	}
+	logData := string(logBytes)
+	if !strings.Contains(logData, "State: Done") {
+		t.Fatalf("expected codex launch to include the completed Linear state, log=%q", logData)
+	}
+	if strings.Contains(logData, "State: In Review") {
+		t.Fatalf("did not expect codex launch to include the stale started state, log=%q", logData)
+	}
+}
+
 func TestUpDoesNotTransitionLinearIssueWhenCodexWindowCreationFails(t *testing.T) {
 	repo := initCommittedRepo(t)
 	installFailingTmuxOnWindow(t, "codex")
@@ -1199,6 +1417,38 @@ func TestUpRecoversLegacyCreatingStateWithBlankPath(t *testing.T) {
 	}
 	if strings.Contains(stderr.String(), "Discarding stale task state") {
 		t.Fatalf("did not expect recoverable creating state to be discarded, got %q", stderr.String())
+	}
+}
+
+func TestBootstrapDoctorDetailsWarnsWhenLockfileNeedsBootstrap(t *testing.T) {
+	t.Parallel()
+
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, "bun.lock"), []byte("lockfile"), 0o644); err != nil {
+		t.Fatalf("write bun.lock: %v", err)
+	}
+
+	details := bootstrapDoctorDetails(RuntimeConfig{RepoRoot: repo})
+	if !strings.Contains(details, "bun.lock detected") {
+		t.Fatalf("expected bun.lock advisory, got %q", details)
+	}
+	if !strings.Contains(details, "[bootstrap].commands") {
+		t.Fatalf("expected bootstrap guidance, got %q", details)
+	}
+}
+
+func TestBootstrapDoctorDetailsReportsConfiguredBootstrap(t *testing.T) {
+	t.Parallel()
+
+	details := bootstrapDoctorDetails(RuntimeConfig{
+		EffectiveConfig: EffectiveConfig{
+			Bootstrap: BootstrapConfig{
+				Commands: []string{"bun install --frozen-lockfile"},
+			},
+		},
+	})
+	if details != "bootstrap commands configured" {
+		t.Fatalf("unexpected bootstrap details: %q", details)
 	}
 }
 

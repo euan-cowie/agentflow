@@ -35,7 +35,7 @@ func TestLinearOpsIssueUsesAuthorizationHeader(t *testing.T) {
 						},
 					},
 					"comments": map[string]any{
-						"pageInfo": map[string]any{"hasNextPage": true},
+						"pageInfo": map[string]any{"hasNextPage": false},
 						"nodes": []map[string]any{
 							{
 								"id":        "comment-1",
@@ -92,14 +92,111 @@ func TestLinearOpsIssueUsesAuthorizationHeader(t *testing.T) {
 	if len(issue.Context.Comments) != 1 || issue.Context.Comments[0].Author != "Alice" {
 		t.Fatalf("expected only top-level comments to be loaded, got %+v", issue.Context.Comments)
 	}
-	if !issue.Context.HasMoreComments {
-		t.Fatalf("expected issue to record more comments availability, got %+v", issue.Context)
+	if issue.Context.HasMoreComments {
+		t.Fatalf("expected issue comments to be fully loaded, got %+v", issue.Context)
 	}
 	if len(issue.Context.Attachments) != 1 || issue.Context.Attachments[0].Title != "Spec" {
 		t.Fatalf("expected attachments to be loaded, got %+v", issue.Context.Attachments)
 	}
 	if !issue.Context.HasMoreAttachments {
 		t.Fatalf("expected issue to record more attachments availability, got %+v", issue.Context)
+	}
+}
+
+func TestLinearOpsIssuePagesTopLevelCommentsPastReplies(t *testing.T) {
+	t.Parallel()
+
+	ops := newLinearTestOps(t, func(r *http.Request) (*http.Response, error) {
+		payload := readLinearPayload(t, r.Body)
+		query := payload["query"].(string)
+		switch {
+		case strings.Contains(query, "query Issue("):
+			return linearHTTPResponse(t, map[string]any{
+				"data": map[string]any{
+					"issue": map[string]any{
+						"id":          "issue-1",
+						"identifier":  "AF-123",
+						"title":       "Fix auth flow",
+						"url":         "https://linear.app/example/issue/AF-123",
+						"updatedAt":   "2026-03-15T10:00:00Z",
+						"description": "Detailed description",
+						"team":        map[string]any{"id": "team-1", "key": "AF", "name": "Agentflow"},
+						"state":       map[string]any{"id": "state-1", "name": "Todo", "type": "unstarted"},
+						"comments": map[string]any{
+							"pageInfo": map[string]any{
+								"hasNextPage": true,
+								"endCursor":   "cursor-1",
+							},
+							"nodes": []map[string]any{
+								{
+									"id":        "comment-1",
+									"body":      "Top-level first page",
+									"createdAt": "2026-03-14T09:00:00Z",
+									"url":       "https://linear.app/example/comment/comment-1",
+									"user":      map[string]any{"name": "Alice"},
+									"parent":    nil,
+								},
+								{
+									"id":        "comment-2",
+									"body":      "Reply should not count against the saved top-level budget",
+									"createdAt": "2026-03-14T10:00:00Z",
+									"url":       "https://linear.app/example/comment/comment-2",
+									"user":      map[string]any{"name": "Bob"},
+									"parent":    map[string]any{"id": "comment-1"},
+								},
+							},
+						},
+					},
+				},
+			}), nil
+		case strings.Contains(query, "query IssueCommentsPage"):
+			variables := payload["variables"].(map[string]any)
+			if variables["after"] != "cursor-1" {
+				t.Fatalf("expected next-page cursor cursor-1, got %v", variables["after"])
+			}
+			return linearHTTPResponse(t, map[string]any{
+				"data": map[string]any{
+					"issue": map[string]any{
+						"comments": map[string]any{
+							"pageInfo": map[string]any{
+								"hasNextPage": false,
+								"endCursor":   "",
+							},
+							"nodes": []map[string]any{
+								{
+									"id":        "comment-3",
+									"body":      "Second top-level page",
+									"createdAt": "2026-03-14T11:00:00Z",
+									"url":       "https://linear.app/example/comment/comment-3",
+									"user":      map[string]any{"name": "Cara"},
+									"parent":    nil,
+								},
+							},
+						},
+					},
+				},
+			}), nil
+		default:
+			t.Fatalf("unexpected query: %s", query)
+			return nil, nil
+		}
+	})
+
+	issue, err := ops.Issue(context.Background(), "test-token", "AF-123")
+	if err != nil {
+		t.Fatalf("Issue returned error: %v", err)
+	}
+	if issue == nil {
+		t.Fatal("expected issue")
+	}
+	if len(issue.Context.Comments) != 2 {
+		t.Fatalf("expected two top-level comments, got %+v", issue.Context.Comments)
+	}
+	if issue.Context.Comments[0].ID != "comment-1" || issue.Context.Comments[1].ID != "comment-3" {
+		t.Fatalf("expected top-level comments from both pages, got %+v", issue.Context.Comments)
+	}
+	if issue.Context.HasMoreComments {
+		t.Fatalf("expected saved comments to be complete after paging, got %+v", issue.Context)
 	}
 }
 
@@ -239,13 +336,22 @@ func TestLinearOpsTransitionIssueAndAttachment(t *testing.T) {
 					"issueUpdate": map[string]any{
 						"success": true,
 						"issue": map[string]any{
-							"id":         "issue-1",
-							"identifier": "AF-123",
-							"title":      "Fix auth flow",
-							"url":        "https://linear.app/example/issue/AF-123",
-							"team":       map[string]any{"id": "team-1", "key": "AF", "name": "Agentflow"},
-							"state":      map[string]any{"id": "state-2", "name": "Done", "type": "completed"},
+							"id": "issue-1",
 						},
+					},
+				},
+			}), nil
+		case strings.Contains(query, "query Issue("):
+			return linearHTTPResponse(t, map[string]any{
+				"data": map[string]any{
+					"issue": map[string]any{
+						"id":         "issue-1",
+						"identifier": "AF-123",
+						"title":      "Fix auth flow",
+						"url":        "https://linear.app/example/issue/AF-123",
+						"updatedAt":  "2026-03-15T10:00:00Z",
+						"team":       map[string]any{"id": "team-1", "key": "AF", "name": "Agentflow"},
+						"state":      map[string]any{"id": "state-2", "name": "Done", "type": "completed"},
 					},
 				},
 			}), nil

@@ -53,6 +53,7 @@ Fields:
 - `env_files`: copy-once env seeding from `{ from, to }`
 
 Use this for install/bootstrap steps, not recurring dev commands.
+For dependency-managed repos, declare install/setup here so new worktrees are ready before the agent starts.
 
 ### `[env]`
 
@@ -118,6 +119,7 @@ Agent profiles are explicit now. If a tmux window references an agent, that agen
 - `resume_prompt` is sent when agentflow recreates or resumes that agent window later
 
 Agentflow also appends task context (`Task`, `Task ID`, and `Worktree`) to those prompts before launching Codex.
+It also appends workflow context (`Surface`, resolved `Verify`, and `Review` commands) plus saved Linear issue context when available.
 
 This means a repo that declares an agent-backed tmux window will start Codex during `agentflow up`. If the prompt tells Codex to read files or inspect the repo, Codex will start doing that immediately. If you want a quieter startup, keep the prompt minimal and explicitly tell Codex to wait for the next instruction.
 
@@ -136,7 +138,7 @@ V1 supports at most one agent-backed window.
 
 For `agentflow up`, `tmux.windows` should be treated as required. Agentflow no longer injects default `editor`, `verify`, or `codex` windows behind your back.
 
-If one of those windows is agent-backed, `agentflow up` will launch it as part of tmux session creation. `agentflow attach` only reconnects to the already-running session; it does not create a second startup prompt on its own.
+If one of those windows is agent-backed, `agentflow up` now scaffolds the tmux session first, syncs tracker state, and only then launches the agent in the prepared window. `agentflow attach` only reconnects to the already-running session; it does not create a second startup prompt on its own.
 
 ### `[delivery]`
 
@@ -255,6 +257,7 @@ Fields:
 These affect doctor output but do not change trust or config drift behavior.
 
 When GitHub delivery is enabled, `agentflow doctor` also reports the detected base-branch merge policy and warns when merge-queue repos need CI coverage for `merge_group` or `gh-readonly-queue/*` refs.
+When the repo root contains `bun.lock`, `package-lock.json`, `pnpm-lock.yaml`, or `yarn.lock` and `[bootstrap].commands` is empty, `agentflow doctor` adds a bootstrap-readiness advisory.
 
 ## Trust And Drift
 
@@ -314,6 +317,9 @@ name = "agentflow"
 base_branch = "main"
 default_surface = "cli"
 
+# [bootstrap]
+# commands = ["bun install --frozen-lockfile"]
+
 [env]
 targets = [{ path = ".env.agentflow" }]
 
@@ -334,8 +340,8 @@ verify_cli = "go test ./..."
 [agents.default]
 runner = "codex"
 command = "codex --no-alt-screen -s workspace-write -a on-request"
-prime_prompt = "Read AGENTS.md and any relevant repo instructions, then wait for my next instruction."
-resume_prompt = "Resume the current task, re-check AGENTS.md if the repo changed, then wait for my next instruction."
+prime_prompt = "Read AGENTS.md and any relevant repo instructions, inspect the task context and relevant files, identify the likely verification path for the current surface, send a short status update with your plan, then wait for confirmation before editing."
+resume_prompt = "Resume the current task, re-check AGENTS.md and local instructions if needed, inspect the current task state and recent changes, send a short status update with your next-step plan, then wait for confirmation before editing."
 
 [tmux]
 session_name = "{{repo}}-{{task}}-{{id}}"
