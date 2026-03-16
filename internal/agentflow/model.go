@@ -21,7 +21,8 @@ type BootstrapConfig struct {
 }
 
 type EnvConfig struct {
-	Targets []EnvTargetConfig `toml:"targets" json:"targets"`
+	Targets   []EnvTargetConfig `toml:"targets" json:"targets"`
+	SyncFiles []EnvFileMapping  `toml:"sync_files" json:"sync_files"`
 }
 
 type EnvTargetConfig struct {
@@ -74,9 +75,11 @@ type AgentConfig struct {
 }
 
 type TmuxWindowConfig struct {
-	Name    string `toml:"name" json:"name"`
-	Command string `toml:"command" json:"command"`
-	Agent   string `toml:"agent" json:"agent"`
+	Name     string   `toml:"name" json:"name"`
+	Cwd      string   `toml:"cwd" json:"cwd"`
+	Command  string   `toml:"command" json:"command"`
+	Agent    string   `toml:"agent" json:"agent"`
+	EnvFiles []string `toml:"env_files" json:"env_files"`
 }
 
 type TmuxConfig struct {
@@ -152,6 +155,7 @@ type TaskState struct {
 	CodexSessionID      string              `json:"codex_session_id,omitempty"`
 	PortBindings        []PortBindingState  `json:"port_bindings,omitempty"`
 	ManagedEnvFiles     []string            `json:"managed_env_files,omitempty"`
+	SyncedEnvFiles      []EnvFileMapping    `json:"synced_env_files,omitempty"`
 	WorkflowFingerprint string              `json:"workflow_fingerprint,omitempty"`
 	IssueState          string              `json:"issue_state,omitempty"`
 	IssueContext        *LinearIssueContext `json:"issue_context,omitempty"`
@@ -291,8 +295,27 @@ const (
 	DeliveryStateBlocked   = "blocked"
 )
 
-func (s TaskState) EffectiveManagedEnvFiles() []string {
+func (s TaskState) EffectiveGeneratedEnvFiles() []string {
 	return append([]string(nil), uniqueStrings(s.ManagedEnvFiles)...)
+}
+
+func (s TaskState) EffectiveSyncedEnvFiles() []EnvFileMapping {
+	out := make([]EnvFileMapping, 0, len(s.SyncedEnvFiles))
+	for _, mapping := range s.SyncedEnvFiles {
+		if mapping.From == "" || mapping.To == "" {
+			continue
+		}
+		out = append(out, mapping)
+	}
+	return out
+}
+
+func (s TaskState) EffectiveManagedEnvFiles() []string {
+	files := append([]string(nil), s.EffectiveGeneratedEnvFiles()...)
+	for _, mapping := range s.EffectiveSyncedEnvFiles() {
+		files = append(files, mapping.To)
+	}
+	return uniqueStrings(files)
 }
 
 func (s TaskState) EffectivePortBindings() []PortBindingState {

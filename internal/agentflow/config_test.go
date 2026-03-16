@@ -168,7 +168,8 @@ func TestWorkflowTrustEntriesIncludeSideEffectfulWorkflow(t *testing.T) {
 			EnvFiles: []EnvFileMapping{{From: ".env.example", To: ".env.local"}},
 		},
 		Env: EnvConfig{
-			Targets: []EnvTargetConfig{{Path: ".env.agentflow"}},
+			Targets:   []EnvTargetConfig{{Path: ".env.agentflow"}},
+			SyncFiles: []EnvFileMapping{{From: ".env", To: ".env"}},
 		},
 		Ports: PortsConfig{
 			Bindings: []PortBindingConfig{{Target: ".env.agentflow", Key: "PORT", Start: 4101, End: 4199}},
@@ -186,7 +187,11 @@ func TestWorkflowTrustEntriesIncludeSideEffectfulWorkflow(t *testing.T) {
 		},
 		Tmux: TmuxConfig{
 			SessionName: "{{repo}}-{{task}}",
-			Windows:     []TmuxWindowConfig{{Name: "editor", Command: "nvim ."}},
+			Windows: []TmuxWindowConfig{{
+				Name:     "editor",
+				Command:  "nvim .",
+				EnvFiles: []string{".env", ".env.agentflow"},
+			}},
 		},
 	}
 
@@ -195,11 +200,14 @@ func TestWorkflowTrustEntriesIncludeSideEffectfulWorkflow(t *testing.T) {
 		"run bootstrap command: bun install",
 		"copy bootstrap env file: .env.example -> .env.local",
 		"write managed env file: .env.agentflow",
+		"sync local env file: .env -> .env",
 		"write preferred port binding: PORT -> .env.agentflow [4101-4199]",
 		"sync task branches against origin using rebase",
 		"run command verify_quick: go test ./...",
 		"run agent default: codex --no-alt-screen",
 		"run tmux window editor: nvim .",
+		"source tmux window editor env file: .env",
+		"source tmux window editor env file: .env.agentflow",
 		"create, inspect, and merge pull requests with gh",
 	}
 	for _, want := range expected {
@@ -267,6 +275,49 @@ func TestEffectiveManagedEnvFilesUsesDeclaredTargets(t *testing.T) {
 	}
 }
 
+func TestEffectiveManagedEnvFilesIncludesSyncedTargets(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultEffectiveConfig()
+	cfg.Env.Targets = []EnvTargetConfig{{Path: "apps/web/.env.agentflow"}}
+	cfg.Env.SyncFiles = []EnvFileMapping{{From: ".env", To: ".env"}}
+
+	files, err := effectiveManagedEnvFiles(cfg)
+	if err != nil {
+		t.Fatalf("effectiveManagedEnvFiles returned error: %v", err)
+	}
+	expected := []string{"apps/web/.env.agentflow", ".env"}
+	if len(files) != len(expected) {
+		t.Fatalf("expected %d managed env files, got %d (%v)", len(expected), len(files), files)
+	}
+	for _, want := range expected {
+		if !contains(files, want) {
+			t.Fatalf("expected managed env files to include %q, got %v", want, files)
+		}
+	}
+}
+
+func TestEffectiveSyncedEnvFilesUsesDeclaredMappings(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultEffectiveConfig()
+	cfg.Env.SyncFiles = []EnvFileMapping{
+		{From: ".env", To: ".env"},
+		{From: "apps/web/.env.local", To: "apps/web/.env.local"},
+	}
+
+	mappings, err := effectiveSyncedEnvFiles(cfg)
+	if err != nil {
+		t.Fatalf("effectiveSyncedEnvFiles returned error: %v", err)
+	}
+	if len(mappings) != 2 {
+		t.Fatalf("expected two synced env files, got %d", len(mappings))
+	}
+	if mappings[0].From != ".env" || mappings[0].To != ".env" {
+		t.Fatalf("unexpected first mapping: %+v", mappings[0])
+	}
+}
+
 func TestEffectivePortBindingsReturnsDeclaredBindings(t *testing.T) {
 	t.Parallel()
 
@@ -299,6 +350,104 @@ func TestValidateEffectiveConfigRejectsUndeclaredBindingTarget(t *testing.T) {
 	err := validateEffectiveConfig(cfg)
 	if err == nil {
 		t.Fatal("expected undeclared binding target to fail validation")
+	}
+}
+
+func TestValidateEffectiveConfigRejectsSyncedEnvTargetOverlap(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultEffectiveConfig()
+	cfg.Env.Targets = []EnvTargetConfig{{Path: ".env.agentflow"}}
+	cfg.Env.SyncFiles = []EnvFileMapping{{From: ".env", To: ".env.agentflow"}}
+
+	err := validateEffectiveConfig(cfg)
+	if err == nil {
+		t.Fatal("expected overlapping env sync target to fail validation")
+	}
+	if !strings.Contains(err.Error(), "must not overlap") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateEffectiveConfigRejectsNormalizedSyncedEnvTargetOverlap(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultEffectiveConfig()
+	cfg.Env.Targets = []EnvTargetConfig{{Path: "apps/web/.env.agentflow"}}
+	cfg.Env.SyncFiles = []EnvFileMapping{{From: ".env", To: "apps/web/./.env.agentflow"}}
+
+	err := validateEffectiveConfig(cfg)
+	if err == nil {
+		t.Fatal("expected normalized env sync target overlap to fail validation")
+	}
+	if !strings.Contains(err.Error(), "must not overlap") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateEffectiveConfigRejectsDuplicateSyncedEnvTarget(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultEffectiveConfig()
+	cfg.Env.SyncFiles = []EnvFileMapping{
+		{From: ".env", To: ".env"},
+		{From: ".env.local", To: ".env"},
+	}
+
+	err := validateEffectiveConfig(cfg)
+	if err == nil {
+		t.Fatal("expected duplicate env sync target to fail validation")
+	}
+	if !strings.Contains(err.Error(), "declared more than once") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateEffectiveConfigRejectsNormalizedDuplicateSyncedEnvTarget(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultEffectiveConfig()
+	cfg.Env.SyncFiles = []EnvFileMapping{
+		{From: ".env", To: "apps/web/.env.local"},
+		{From: ".env.local", To: "apps/web/./.env.local"},
+	}
+
+	err := validateEffectiveConfig(cfg)
+	if err == nil {
+		t.Fatal("expected normalized duplicate env sync target to fail validation")
+	}
+	if !strings.Contains(err.Error(), "declared more than once") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateEffectiveConfigRejectsSyncedEnvSourceOutsideRepoRoot(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultEffectiveConfig()
+	cfg.Env.SyncFiles = []EnvFileMapping{{From: "../.env", To: ".env"}}
+
+	err := validateEffectiveConfig(cfg)
+	if err == nil {
+		t.Fatal("expected env sync source outside repo root to fail validation")
+	}
+	if !strings.Contains(err.Error(), "repo root") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateEffectiveConfigRejectsSyncedEnvTargetOutsideWorktree(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultEffectiveConfig()
+	cfg.Env.SyncFiles = []EnvFileMapping{{From: ".env", To: "../.env"}}
+
+	err := validateEffectiveConfig(cfg)
+	if err == nil {
+		t.Fatal("expected env sync target outside worktree to fail validation")
+	}
+	if !strings.Contains(err.Error(), "worktree") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -381,6 +530,44 @@ func TestValidateEffectiveConfigRejectsAgentWithoutCommand(t *testing.T) {
 		t.Fatal("expected agent without command to fail validation")
 	}
 	if !strings.Contains(err.Error(), "must declare command") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateEffectiveConfigRejectsTmuxWindowCwdOutsideWorktree(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultEffectiveConfig()
+	cfg.Tmux.Windows = []TmuxWindowConfig{{
+		Name:    "web",
+		Cwd:     "../apps/web",
+		Command: "bun run dev",
+	}}
+
+	err := validateEffectiveConfig(cfg)
+	if err == nil {
+		t.Fatal("expected invalid tmux window cwd to fail validation")
+	}
+	if !strings.Contains(err.Error(), "cwd") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateEffectiveConfigRejectsTmuxWindowEnvFileOutsideWorktree(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultEffectiveConfig()
+	cfg.Tmux.Windows = []TmuxWindowConfig{{
+		Name:     "web",
+		Command:  "bun run dev",
+		EnvFiles: []string{"../.env.agentflow"},
+	}}
+
+	err := validateEffectiveConfig(cfg)
+	if err == nil {
+		t.Fatal("expected invalid tmux window env file to fail validation")
+	}
+	if !strings.Contains(err.Error(), "env file") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -507,6 +694,7 @@ func TestRenderEffectiveConfigOmitsEmptyFields(t *testing.T) {
 		"agent = ''",
 		"command = ''",
 		"bindings = []",
+		"sync_files = []",
 		"mcp_servers = []",
 		"labels = []",
 		"reviewers = []",
@@ -550,6 +738,46 @@ func TestRenderEffectiveConfigIncludesLinearIssueSort(t *testing.T) {
 	}
 	if !strings.Contains(content, "issue_sort = 'updated'") {
 		t.Fatalf("expected rendered config to include issue_sort, got:\n%s", content)
+	}
+}
+
+func TestRenderEffectiveConfigIncludesTmuxWindowRuntimeFields(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultEffectiveConfig()
+	cfg.Tmux.Windows = []TmuxWindowConfig{{
+		Name:     "web",
+		Cwd:      "apps/web",
+		Command:  "bun run dev",
+		EnvFiles: []string{"apps/web/.env.local", "apps/web/.env.agentflow"},
+	}}
+
+	content, err := RenderEffectiveConfig(cfg, "toml")
+	if err != nil {
+		t.Fatalf("RenderEffectiveConfig returned error: %v", err)
+	}
+	for _, expected := range []string{
+		"cwd = 'apps/web'",
+		"env_files = ['apps/web/.env.local', 'apps/web/.env.agentflow']",
+	} {
+		if !strings.Contains(content, expected) {
+			t.Fatalf("expected rendered config to include %q, got:\n%s", expected, content)
+		}
+	}
+}
+
+func TestRenderEffectiveConfigIncludesSyncedEnvFiles(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultEffectiveConfig()
+	cfg.Env.SyncFiles = []EnvFileMapping{{From: ".env", To: ".env"}}
+
+	content, err := RenderEffectiveConfig(cfg, "toml")
+	if err != nil {
+		t.Fatalf("RenderEffectiveConfig returned error: %v", err)
+	}
+	if !strings.Contains(content, "[[env.sync_files]]") || !strings.Contains(content, "from = '.env'") || !strings.Contains(content, "to = '.env'") {
+		t.Fatalf("expected rendered config to include env.sync_files, got:\n%s", content)
 	}
 }
 

@@ -959,16 +959,21 @@ func (a *App) runConfiguredCommand(ctx context.Context, runtime RuntimeConfig, s
 	if err != nil {
 		return TaskSummary{}, err
 	}
+	window, _ := namedCommandTmuxWindow(runtime.EffectiveConfig, resolvedName)
+	cwd, command, err := commandWithTmuxWindowRuntime(state, window, command)
+	if err != nil {
+		return TaskSummary{}, err
+	}
 	logPath, err := a.state.NewRunLogPath(state.RepoID, state.TaskID, resolvedName, a.now())
 	if err != nil {
 		return TaskSummary{}, err
 	}
 	if foreground {
-		if err := a.exec.RunLogged(ctx, state.WorktreePath, taskEnv(state), logPath, a.stdout, command); err != nil {
+		if err := a.exec.RunLogged(ctx, cwd, taskEnv(state), logPath, a.stdout, command); err != nil {
 			return TaskSummary{}, err
 		}
 	} else {
-		if err := a.exec.RunLogged(ctx, state.WorktreePath, taskEnv(state), logPath, nil, command); err != nil {
+		if err := a.exec.RunLogged(ctx, cwd, taskEnv(state), logPath, nil, command); err != nil {
 			return TaskSummary{}, err
 		}
 	}

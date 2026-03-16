@@ -1,6 +1,7 @@
 package agentflow
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -125,6 +126,9 @@ func TestBuildTaskEnvStateAllocatesBindingsPerTarget(t *testing.T) {
 		{Path: "apps/web/.env.agentflow"},
 		{Path: "packages/api/.env.agentflow"},
 	}
+	cfg.Env.SyncFiles = []EnvFileMapping{
+		{From: ".env", To: ".env"},
+	}
 	cfg.Ports.Bindings = []PortBindingConfig{
 		{Target: "apps/web/.env.agentflow", Key: "VITE_PORT", Start: 34001, End: 34100},
 		{Target: "packages/api/.env.agentflow", Key: "PORT", Start: 35001, End: 35100},
@@ -143,12 +147,15 @@ func TestBuildTaskEnvStateAllocatesBindingsPerTarget(t *testing.T) {
 		preferredPortAllocator = originalAllocator
 	}()
 
-	targets, bindings, err := buildTaskEnvState(cfg)
+	targets, synced, bindings, err := buildTaskEnvState(cfg)
 	if err != nil {
 		t.Fatalf("buildTaskEnvState returned error: %v", err)
 	}
 	if len(targets) != 2 {
 		t.Fatalf("expected two targets, got %d", len(targets))
+	}
+	if len(synced) != 1 || synced[0].From != ".env" || synced[0].To != ".env" {
+		t.Fatalf("expected synced env mappings, got %+v", synced)
 	}
 	if len(bindings) != 2 {
 		t.Fatalf("expected two bindings, got %d", len(bindings))
@@ -158,6 +165,173 @@ func TestBuildTaskEnvStateAllocatesBindingsPerTarget(t *testing.T) {
 	}
 	if bindings[0].Port == 0 || bindings[1].Port == 0 {
 		t.Fatalf("expected allocated ports, got %+v", bindings)
+	}
+}
+
+func TestSyncEnvFilesCopiesFromCanonicalRepoRoot(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := t.TempDir()
+	worktree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoRoot, ".env"), []byte("SECRET=repo\n"), 0o644); err != nil {
+		t.Fatalf("write canonical env file: %v", err)
+	}
+
+	written, err := syncEnvFiles(repoRoot, worktree, []EnvFileMapping{{From: ".env", To: ".env"}})
+	if err != nil {
+		t.Fatalf("syncEnvFiles returned error: %v", err)
+	}
+	if len(written) != 1 {
+		t.Fatalf("expected one synced env file, got %d", len(written))
+	}
+	data, err := os.ReadFile(filepath.Join(worktree, ".env"))
+	if err != nil {
+		t.Fatalf("read synced env file: %v", err)
+	}
+	if string(data) != "SECRET=repo\n" {
+		t.Fatalf("unexpected synced env contents: %q", string(data))
+	}
+}
+
+func TestSyncEnvFilesOverwritesExistingTarget(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := t.TempDir()
+	worktree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoRoot, ".env"), []byte("SECRET=repo\n"), 0o644); err != nil {
+		t.Fatalf("write canonical env file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".env"), []byte("SECRET=worktree\n"), 0o644); err != nil {
+		t.Fatalf("write worktree env file: %v", err)
+	}
+
+	if _, err := syncEnvFiles(repoRoot, worktree, []EnvFileMapping{{From: ".env", To: ".env"}}); err != nil {
+		t.Fatalf("syncEnvFiles returned error: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(worktree, ".env"))
+	if err != nil {
+		t.Fatalf("read synced env file: %v", err)
+	}
+	if string(data) != "SECRET=repo\n" {
+		t.Fatalf("expected canonical env contents to win, got %q", string(data))
+	}
+}
+
+func TestSyncEnvFilesPreservesSourcePermissions(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := t.TempDir()
+	worktree := t.TempDir()
+	sourcePath := filepath.Join(repoRoot, ".env")
+	targetPath := filepath.Join(worktree, ".env")
+
+	if err := os.WriteFile(sourcePath, []byte("SECRET=repo\n"), 0o600); err != nil {
+		t.Fatalf("write canonical env file: %v", err)
+	}
+	if err := os.WriteFile(targetPath, []byte("SECRET=worktree\n"), 0o644); err != nil {
+		t.Fatalf("write worktree env file: %v", err)
+	}
+
+	if _, err := syncEnvFiles(repoRoot, worktree, []EnvFileMapping{{From: ".env", To: ".env"}}); err != nil {
+		t.Fatalf("syncEnvFiles returned error: %v", err)
+	}
+
+	info, err := os.Stat(targetPath)
+	if err != nil {
+		t.Fatalf("stat synced env file: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("expected synced env permissions 0600, got %o", got)
+	}
+}
+
+func TestSyncEnvFilesRefreshesReadOnlyTarget(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := t.TempDir()
+	worktree := t.TempDir()
+	sourcePath := filepath.Join(repoRoot, ".env")
+	targetPath := filepath.Join(worktree, ".env")
+
+	if err := os.WriteFile(sourcePath, []byte("SECRET=first\n"), 0o400); err != nil {
+		t.Fatalf("write canonical env file: %v", err)
+	}
+	if _, err := syncEnvFiles(repoRoot, worktree, []EnvFileMapping{{From: ".env", To: ".env"}}); err != nil {
+		t.Fatalf("initial syncEnvFiles returned error: %v", err)
+	}
+
+	if err := os.Chmod(sourcePath, 0o600); err != nil {
+		t.Fatalf("chmod canonical env file writable: %v", err)
+	}
+	if err := os.WriteFile(sourcePath, []byte("SECRET=second\n"), 0o400); err != nil {
+		t.Fatalf("update canonical env file: %v", err)
+	}
+	if err := os.Chmod(sourcePath, 0o400); err != nil {
+		t.Fatalf("chmod canonical env file read-only: %v", err)
+	}
+	if _, err := syncEnvFiles(repoRoot, worktree, []EnvFileMapping{{From: ".env", To: ".env"}}); err != nil {
+		t.Fatalf("refresh syncEnvFiles returned error: %v", err)
+	}
+
+	data, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("read refreshed env file: %v", err)
+	}
+	if string(data) != "SECRET=second\n" {
+		t.Fatalf("expected refreshed env contents, got %q", string(data))
+	}
+	info, err := os.Stat(targetPath)
+	if err != nil {
+		t.Fatalf("stat refreshed env file: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o400 {
+		t.Fatalf("expected refreshed env permissions 0400, got %o", got)
+	}
+}
+
+func TestSyncEnvFilesRejectsSymlinkedTargetOutsideWorktree(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := t.TempDir()
+	worktree := t.TempDir()
+	external := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoRoot, ".env"), []byte("SECRET=repo\n"), 0o644); err != nil {
+		t.Fatalf("write canonical env file: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(worktree, "apps"), 0o755); err != nil {
+		t.Fatalf("mkdir worktree apps dir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(external, "web"), 0o755); err != nil {
+		t.Fatalf("mkdir external web dir: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(external, "web"), filepath.Join(worktree, "apps", "web")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	_, err := syncEnvFiles(repoRoot, worktree, []EnvFileMapping{{From: ".env", To: "apps/web/.env"}})
+	if err == nil {
+		t.Fatal("expected syncEnvFiles to reject symlinked target outside the worktree")
+	}
+	if !strings.Contains(err.Error(), "escapes worktree") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(external, "web", ".env")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected no external env file to be written, stat err=%v", statErr)
+	}
+}
+
+func TestSyncEnvFilesFailsWhenSourceMissing(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := t.TempDir()
+	worktree := t.TempDir()
+
+	_, err := syncEnvFiles(repoRoot, worktree, []EnvFileMapping{{From: ".env", To: ".env"}})
+	if err == nil {
+		t.Fatal("expected syncEnvFiles to fail when the canonical source file is missing")
+	}
+	if !strings.Contains(err.Error(), "stat env sync source") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

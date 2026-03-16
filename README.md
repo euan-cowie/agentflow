@@ -39,7 +39,7 @@
 - Task state: `~/.local/state/agentflow/tasks/<repo-id>/<task-id>.json`
 - Trust cache: `~/.local/state/agentflow/trust/<repo-id>.json`
 - Default worktrees: `~/.local/state/agentflow/worktrees/<repo-id>/<task-slug>-<taskid6>`
-- Managed env files: `.env.agentflow` by default, or multiple `env.targets` in monorepos
+- Managed env files: generated overlays via `env.targets`, plus synced local env files via `env.sync_files`
 - Optional state overrides: `AGENTFLOW_STATE_HOME`, `AGENTFLOW_HOME`
 
 Config ownership is:
@@ -79,10 +79,13 @@ default_surface = "web"
 [bootstrap]
 commands = ["bun install --frozen-lockfile"]
 env_files = [
-  { from = ".env.example", to = ".env.local" },
+  { from = "apps/web/.env.example", to = "apps/web/.env.local" },
 ]
 
 [env]
+sync_files = [
+  { from = ".env", to = ".env" },
+]
 targets = [
   { path = "apps/web/.env.agentflow" },
   { path = "packages/api/.env.agentflow" },
@@ -128,6 +131,12 @@ session_name = "{{repo}}-{{task}}-{{id}}"
 [[tmux.windows]]
 name = "editor"
 command = "nvim ."
+
+[[tmux.windows]]
+name = "web"
+cwd = "apps/web"
+env_files = [".env", "apps/web/.env.local", "apps/web/.env.agentflow"]
+command = "bun run dev"
 
 [[tmux.windows]]
 name = "verify"
@@ -188,7 +197,10 @@ Task-targeting commands such as `attach`, `codex`, `sync`, `submit`, `land`, `ve
 - Existing task identity is anchored to saved state. Config drift is additive for tmux windows and current-only for verify/review commands.
 - Ports are treated as agentflow-managed preferred ports, not hard socket reservations.
 - `worktree_root` supports `{{agentflow_state_home}}`, `{{repo_id}}`, and `{{repo}}`.
-- `env.targets` declares the agentflow-managed env files for the task, and `ports.bindings` attaches generated ports to those targets.
+- `bootstrap.env_files` is the copy-once template layer for placeholder app env files.
+- `env.sync_files` refreshes real local secret files from the canonical repo root into every worktree.
+- `env.targets` declares the generated per-task env overlays, and `ports.bindings` attaches computed ports to those targets.
+- `tmux.windows[*].env_files` lets app windows source those static and dynamic layers in an explicit order before startup.
 - `[delivery]` configures branch sync, preflight, and async cleanup behavior.
 - `[github]` enables optional `gh` integration for PR creation, checks, and merge automation.
 - `github.merge_method = "auto"` is GitHub-policy-aware: it prefers queue-compatible behavior first, then a linear-history-safe method when required, and otherwise falls back to regular merge.

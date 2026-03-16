@@ -310,11 +310,12 @@ func (a *App) Up(ctx context.Context, opts UpOptions) (TaskSummary, error) {
 	state.BaseBranch = resolvedBase
 	state.Delivery.BaseRef = normalizeBaseBranch(state.BaseBranch, state.Delivery.Remote)
 
-	managedEnvFiles, portBindings, err := buildTaskEnvState(runtime.EffectiveConfig)
+	managedEnvFiles, syncedEnvFiles, portBindings, err := buildTaskEnvState(runtime.EffectiveConfig)
 	if err != nil {
 		return a.failState(state, err)
 	}
 	state.ManagedEnvFiles = managedEnvFiles
+	state.SyncedEnvFiles = syncedEnvFiles
 	state.PortBindings = portBindings
 	if err := a.state.Save(state); err != nil {
 		return TaskSummary{}, err
@@ -333,16 +334,19 @@ func (a *App) Up(ctx context.Context, opts UpOptions) (TaskSummary, error) {
 		return TaskSummary{}, err
 	}
 
-	if err := syncManagedEnvFiles(state); err != nil {
+	if err := prepareManagedEnvFiles(
+		state.RepoRoot,
+		state.WorktreePath,
+		state.EffectiveSyncedEnvFiles(),
+		runtime.EffectiveConfig.Bootstrap.EnvFiles,
+		state.EffectiveGeneratedEnvFiles(),
+		state.EffectivePortBindings(),
+	); err != nil {
 		return a.failState(state, err)
 	}
 	state.UpdatedAt = a.now()
 	if err := a.state.Save(state); err != nil {
 		return TaskSummary{}, err
-	}
-
-	if err := seedEnvFiles(state.WorktreePath, runtime.EffectiveConfig.Bootstrap.EnvFiles); err != nil {
-		return a.failState(state, err)
 	}
 	if err := a.runBootstrap(ctx, runtime, state); err != nil {
 		return a.failState(state, err)
@@ -374,7 +378,7 @@ func (a *App) reconcileExisting(ctx context.Context, runtime RuntimeConfig, stat
 		_, failErr := a.failState(state, fmt.Errorf("task %q is broken: %w. Run `agentflow down %q` to remove stale state, or `agentflow repair %q` if the worktree still exists", state.TaskRef.Title, err, state.TaskRef.Title, state.TaskRef.Title))
 		return TaskSummary{}, failErr
 	}
-	if err := syncManagedEnvFiles(state); err != nil {
+	if err := syncManagedEnvFiles(runtime.EffectiveConfig, state); err != nil {
 		return a.failState(state, err)
 	}
 	scaffold, err := a.ensureTmuxScaffold(ctx, &runtime, &state, false)
@@ -470,14 +474,19 @@ func (a *App) runNamedCommand(ctx context.Context, opts VerifyOptions, name stri
 		return TaskSummary{}, err
 	}
 
-	if !opts.Foreground && a.tmux.HasSession(ctx, state.TmuxSession) && a.tmux.WindowExists(ctx, state.TmuxSession, "verify") {
-		window := TmuxWindowConfig{Name: "verify"}
+	window, _ := namedCommandTmuxWindow(runtime.EffectiveConfig, resolvedName)
+	cwd, command, err := commandWithTmuxWindowRuntime(state, window, command)
+	if err != nil {
+		return TaskSummary{}, err
+	}
+
+	if !opts.Foreground && window.Name != "" && a.tmux.HasSession(ctx, state.TmuxSession) && a.tmux.WindowExists(ctx, state.TmuxSession, window.Name) {
 		command = shellCommandWithEnv(command, taskEnv(state))
-		if err := a.tmux.RespawnWindow(ctx, state.TmuxSession, state.WorktreePath, window, command+" | tee "+shellQuote(logPath)); err != nil {
+		if err := a.tmux.RespawnWindow(ctx, state.TmuxSession, cwd, window, command+" | tee "+shellQuote(logPath)); err != nil {
 			return TaskSummary{}, err
 		}
 	} else {
-		if err := a.exec.RunLogged(ctx, state.WorktreePath, taskEnv(state), logPath, a.stdout, command); err != nil {
+		if err := a.exec.RunLogged(ctx, cwd, taskEnv(state), logPath, a.stdout, command); err != nil {
 			return TaskSummary{}, err
 		}
 	}
@@ -635,12 +644,11 @@ func (a *App) Repair(ctx context.Context, opts CommonOptions, task string) (Task
 		return TaskSummary{}, failErr
 	}
 
-	if err := syncManagedEnvFiles(state); err != nil {
-		return a.failState(state, err)
-	}
-
 	entries := workflowTrustEntries(runtime.Config)
 	if _, err := a.trust.EnsureTrusted(runtime.RepoID, runtime.RepoRoot, runtime.ConfigPath, runtime.WorkflowFingerprint, entries, a.stdin, a.stdout); err != nil {
+		return a.failState(state, err)
+	}
+	if err := syncManagedEnvFiles(runtime.EffectiveConfig, state); err != nil {
 		return a.failState(state, err)
 	}
 
@@ -831,9 +839,14 @@ func detectedBootstrapLockfile(repoRoot string) string {
 	return ""
 }
 
-func syncManagedEnvFiles(state TaskState) error {
-	_, err := writeManagedEnvFiles(state.WorktreePath, state.EffectiveManagedEnvFiles(), portBindingValues(state.EffectivePortBindings()))
-	return err
+func syncManagedEnvFiles(cfg EffectiveConfig, state TaskState) error {
+	if _, err := syncEnvFiles(state.RepoRoot, state.WorktreePath, state.EffectiveSyncedEnvFiles()); err != nil {
+		return err
+	}
+	if err := seedEnvFiles(state.WorktreePath, cfg.Bootstrap.EnvFiles); err != nil {
+		return err
+	}
+	return syncGeneratedEnvFiles(state.WorktreePath, state.EffectiveGeneratedEnvFiles(), state.EffectivePortBindings())
 }
 
 func (a *App) failState(state TaskState, err error) (TaskSummary, error) {
@@ -1013,13 +1026,16 @@ func (a *App) ensureTmuxScaffold(ctx context.Context, runtime *RuntimeConfig, st
 	result := tmuxScaffoldResult{}
 	for idx, window := range windows {
 		exists := sessionExists && windowExists[window.Name]
+		cwd, err := resolveTmuxWindowCwd(state.WorktreePath, window)
+		if err != nil {
+			return tmuxScaffoldResult{}, err
+		}
 		command := ""
 		if window.Agent != "" {
 			if !exists || firstCreate {
 				result.AgentWindows = append(result.AgentWindows, window)
 			}
 		} else {
-			var err error
 			command, err = a.windowCommand(runtime.EffectiveConfig, *state, window, false)
 			if err != nil {
 				return tmuxScaffoldResult{}, err
@@ -1027,7 +1043,7 @@ func (a *App) ensureTmuxScaffold(ctx context.Context, runtime *RuntimeConfig, st
 		}
 
 		if !sessionExists && idx == 0 {
-			if err := a.tmux.NewSession(ctx, state.TmuxSession, state.WorktreePath, window, command); err != nil {
+			if err := a.tmux.NewSession(ctx, state.TmuxSession, cwd, window, command); err != nil {
 				return tmuxScaffoldResult{}, err
 			}
 			sessionExists = true
@@ -1036,14 +1052,14 @@ func (a *App) ensureTmuxScaffold(ctx context.Context, runtime *RuntimeConfig, st
 		}
 
 		if !exists {
-			if err := a.tmux.AddWindow(ctx, state.TmuxSession, state.WorktreePath, window, command); err != nil {
+			if err := a.tmux.AddWindow(ctx, state.TmuxSession, cwd, window, command); err != nil {
 				return tmuxScaffoldResult{}, err
 			}
 			windowExists[window.Name] = true
 			continue
 		}
 		if firstCreate && window.Agent != "" {
-			if err := a.tmux.RespawnWindow(ctx, state.TmuxSession, state.WorktreePath, window, ""); err != nil {
+			if err := a.tmux.RespawnWindow(ctx, state.TmuxSession, cwd, window, ""); err != nil {
 				return tmuxScaffoldResult{}, err
 			}
 		}
@@ -1086,7 +1102,11 @@ func (a *App) launchAgentWindows(ctx context.Context, runtime RuntimeConfig, sta
 
 func (a *App) windowCommand(cfg EffectiveConfig, state TaskState, window TmuxWindowConfig, resume bool) (string, error) {
 	if window.Command != "" {
-		return shellCommandWithEnv(window.Command, taskEnv(state)), nil
+		_, command, err := commandWithTmuxWindowRuntime(state, window, window.Command)
+		if err != nil {
+			return "", err
+		}
+		return shellCommandWithEnv(command, taskEnv(state)), nil
 	}
 	agent := cfg.Agents[window.Agent]
 	if agent.Runner == "" {
@@ -1097,11 +1117,122 @@ func (a *App) windowCommand(cfg EffectiveConfig, state TaskState, window TmuxWin
 		prompt = agent.ResumePrompt
 	}
 	contextPrompt := buildAgentContextPrompt(cfg, prompt, state)
-	command, err := a.runner.commandString(agent, state.WorktreePath, contextPrompt, resume)
+	cwd, err := resolveTmuxWindowCwd(state.WorktreePath, window)
+	if err != nil {
+		return "", err
+	}
+	command, err := a.runner.commandString(agent, cwd, contextPrompt, resume)
+	if err != nil {
+		return "", err
+	}
+	_, command, err = commandWithTmuxWindowRuntime(state, window, command)
 	if err != nil {
 		return "", err
 	}
 	return shellCommandWithEnv(command, taskEnv(state)), nil
+}
+
+func commandWithTmuxWindowRuntime(state TaskState, window TmuxWindowConfig, command string) (string, string, error) {
+	cwd, err := resolveTmuxWindowCwd(state.WorktreePath, window)
+	if err != nil {
+		return "", "", err
+	}
+	envFiles, err := resolveTmuxWindowEnvFiles(state.WorktreePath, window)
+	if err != nil {
+		return "", "", err
+	}
+	return cwd, sourceEnvFilesCommand(command, envFiles), nil
+}
+
+func namedCommandTmuxWindow(cfg EffectiveConfig, name string) (TmuxWindowConfig, bool) {
+	switch name {
+	case "review":
+		for _, window := range cfg.Tmux.Windows {
+			if window.Name == "verify" {
+				return window, true
+			}
+		}
+		return TmuxWindowConfig{Name: "verify"}, true
+	default:
+		if !isVerifyCommandName(name) {
+			return TmuxWindowConfig{}, false
+		}
+		for _, window := range cfg.Tmux.Windows {
+			if window.Name == "verify" {
+				return window, true
+			}
+		}
+		return TmuxWindowConfig{Name: "verify"}, true
+	}
+}
+
+func isVerifyCommandName(name string) bool {
+	name = strings.TrimSpace(name)
+	return name == "verify" || strings.HasPrefix(name, "verify_")
+}
+
+func resolveTmuxWindowCwd(worktree string, window TmuxWindowConfig) (string, error) {
+	if strings.TrimSpace(window.Cwd) == "" {
+		return filepath.Clean(worktree), nil
+	}
+	return resolveTmuxWindowPath(worktree, window.Cwd, fmt.Sprintf("tmux window %q cwd", window.Name))
+}
+
+func resolveTmuxWindowEnvFiles(worktree string, window TmuxWindowConfig) ([]string, error) {
+	files := make([]string, 0, len(window.EnvFiles))
+	for _, envFile := range uniqueStrings(window.EnvFiles) {
+		resolved, err := resolveTmuxWindowPath(worktree, envFile, fmt.Sprintf("tmux window %q env file", window.Name))
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, resolved)
+	}
+	return files, nil
+}
+
+func resolveTmuxWindowPath(worktree string, path string, label string) (string, error) {
+	path = strings.TrimSpace(path)
+	if err := validateTmuxWindowRelativePath(path, label); err != nil {
+		return "", err
+	}
+	root := filepath.Clean(worktree)
+	resolved := filepath.Clean(filepath.Join(root, path))
+	rel, err := filepath.Rel(root, resolved)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", label, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("%s must not escape the worktree", label)
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		canonicalRoot = root
+	}
+	canonicalResolved, err := filepath.EvalSymlinks(resolved)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", label, err)
+	}
+	rel, err = filepath.Rel(canonicalRoot, canonicalResolved)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", label, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("%s must not escape the worktree", label)
+	}
+	return resolved, nil
+}
+
+func sourceEnvFilesCommand(command string, envFiles []string) string {
+	if len(envFiles) == 0 {
+		return command
+	}
+	steps := make([]string, 0, len(envFiles)+2)
+	steps = append(steps, "set -a")
+	for _, envFile := range envFiles {
+		steps = append(steps, ". "+shellQuote(envFile))
+	}
+	steps = append(steps, "set +a", "( "+command+" )")
+	return strings.Join(steps, " && ")
 }
 
 func resolveCommand(cfg EffectiveConfig, state TaskState, name string, surface string) (string, string, error) {

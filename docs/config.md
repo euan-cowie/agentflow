@@ -56,6 +56,7 @@ Fields:
 
 Use this for install/bootstrap steps, not recurring dev commands.
 For dependency-managed repos, declare install/setup here so new worktrees are ready before the agent starts.
+Use `env_files` for copy-once templates such as `.env.example -> .env.local`, then layer real local secrets through `env.sync_files` and task-specific values through `env.targets`.
 
 ### `[env]`
 
@@ -64,8 +65,21 @@ Agentflow-managed env files.
 Fields:
 
 - `targets`: list of `{ path = "..." }`
+- `sync_files`: list of `{ from = "...", to = "..." }`
 
-These files are owned by agentflow. It may create or rewrite them while preparing a task, and it removes them during teardown.
+`targets` are agentflow-generated env files. Agentflow may create or rewrite them while preparing a task, and it removes them during teardown.
+Use them for dynamic per-task values such as generated ports, callback URLs, or service endpoints that should differ across worktrees.
+
+`sync_files` copy real local env files from the canonical repo root into each task worktree. Agentflow refreshes them on `up`, reconcile, and `repair`, and removes the synced targets during teardown.
+
+Rules:
+
+- `sync_files[*].from` is relative to the canonical repo root
+- `sync_files[*].to` is relative to the task worktree
+- synced targets must not overlap `env.targets`
+- missing `sync_files[*].from` files fail startup instead of silently skipping
+
+This is the layer to use for real local secrets or stable per-developer config that should be the same across every worktree.
 
 This section is optional. If you do not need agentflow-managed env files, omit it entirely.
 
@@ -134,11 +148,19 @@ Fields:
 - `session_name`
 - `[[tmux.windows]]`
   - `name`
+  - `cwd`
   - `command` or `agent`
+  - `env_files`
 
 V1 supports at most one agent-backed window.
 
 For `agentflow up`, `tmux.windows` should be treated as required. Agentflow no longer injects default `editor`, `verify`, or `codex` windows behind your back.
+
+`cwd` is relative to the task worktree. Use it when a window should start in an app subdirectory such as `apps/web`.
+
+`env_files` are sourced in order before the window command runs. Paths are relative to the task worktree, which makes it easy to layer a stable app env file such as `apps/web/.env.local` with a generated overlay such as `apps/web/.env.agentflow`.
+
+Because agentflow sources these files through `sh`, keep them shell-compatible (`KEY=value` style) if you plan to load them through `tmux.windows[*].env_files`.
 
 If one of those windows is agent-backed, `agentflow up` now scaffolds the tmux session first, syncs tracker state, and only then launches the agent in the prepared window. `agentflow attach` only reconnects to the already-running session; it does not create a second startup prompt on its own.
 
@@ -285,7 +307,7 @@ The trust prompt is intentionally narrower than “all workflow config”. It sh
 - commands it will run
 - tmux window commands it will launch
 - agent commands it will launch
-- managed env files or port bindings it will write
+- synced local env files, managed env files, or port bindings it will write
 - branch sync and push behavior
 - GitHub PR operations when enabled
 - Linear issue reads and updates when enabled
@@ -324,6 +346,7 @@ default_surface = "cli"
 
 [env]
 targets = [{ path = ".env.agentflow" }]
+# sync_files = [{ from = ".env", to = ".env" }]
 
 [delivery]
 remote = "origin"

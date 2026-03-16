@@ -154,12 +154,22 @@ func TestTaskStateEffectiveManagedEnvFilesAndBindings(t *testing.T) {
 
 	state := TaskState{
 		ManagedEnvFiles: []string{"apps/web/.env.agentflow", "packages/api/.env.agentflow"},
+		SyncedEnvFiles: []EnvFileMapping{
+			{From: ".env", To: ".env"},
+			{From: "apps/web/.env.local", To: "apps/web/.env.local"},
+		},
 		PortBindings: []PortBindingState{
 			{Target: "apps/web/.env.agentflow", Key: "VITE_PORT", Port: 4101},
 			{Target: "packages/api/.env.agentflow", Key: "PORT", Port: 5101},
 		},
 	}
-	if len(state.EffectiveManagedEnvFiles()) != 2 {
+	if len(state.EffectiveGeneratedEnvFiles()) != 2 {
+		t.Fatalf("expected state to expose generated env files, got %v", state.EffectiveGeneratedEnvFiles())
+	}
+	if len(state.EffectiveSyncedEnvFiles()) != 2 {
+		t.Fatalf("expected state to expose synced env files, got %+v", state.EffectiveSyncedEnvFiles())
+	}
+	if len(state.EffectiveManagedEnvFiles()) != 4 {
 		t.Fatalf("expected state to expose both managed env files, got %v", state.EffectiveManagedEnvFiles())
 	}
 	if len(state.EffectivePortBindings()) != 2 {

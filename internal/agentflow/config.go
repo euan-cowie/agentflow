@@ -60,6 +60,9 @@ func applyConfigFile(base EffectiveConfig, cfg ConfigFile) EffectiveConfig {
 	if len(cfg.Env.Targets) > 0 {
 		out.Env.Targets = append([]EnvTargetConfig(nil), cfg.Env.Targets...)
 	}
+	if len(cfg.Env.SyncFiles) > 0 {
+		out.Env.SyncFiles = append([]EnvFileMapping(nil), cfg.Env.SyncFiles...)
+	}
 	if len(cfg.Ports.Bindings) > 0 {
 		out.Ports.Bindings = append([]PortBindingConfig(nil), cfg.Ports.Bindings...)
 	}
@@ -238,7 +241,11 @@ func resolveRuntimeConfig(repoRoot string) (RuntimeConfig, error) {
 }
 
 func validateEffectiveConfig(cfg EffectiveConfig) error {
-	managedFiles, err := effectiveManagedEnvFiles(cfg)
+	generatedEnvFiles, err := effectiveGeneratedEnvFiles(cfg)
+	if err != nil {
+		return err
+	}
+	syncedEnvFiles, err := effectiveSyncedEnvFiles(cfg)
 	if err != nil {
 		return err
 	}
@@ -247,15 +254,34 @@ func validateEffectiveConfig(cfg EffectiveConfig) error {
 		return err
 	}
 	seenTargets := map[string]struct{}{}
-	for _, path := range managedFiles {
+	for _, path := range generatedEnvFiles {
 		path = strings.TrimSpace(path)
 		if path == "" {
 			return errors.New("managed env target path must not be empty")
+		}
+		if err := validateWorktreeRelativePath(path, fmt.Sprintf("env target %q", path)); err != nil {
+			return err
 		}
 		if _, exists := seenTargets[path]; exists {
 			return fmt.Errorf("managed env target %q is declared more than once", path)
 		}
 		seenTargets[path] = struct{}{}
+	}
+	seenSyncedTargets := map[string]struct{}{}
+	for _, mapping := range syncedEnvFiles {
+		if err := validateRepoRelativePath(mapping.From, fmt.Sprintf("env sync source %q", mapping.From)); err != nil {
+			return err
+		}
+		if err := validateWorktreeRelativePath(mapping.To, fmt.Sprintf("env sync target %q", mapping.To)); err != nil {
+			return err
+		}
+		if _, exists := seenTargets[mapping.To]; exists {
+			return fmt.Errorf("env sync target %q must not overlap env.targets", mapping.To)
+		}
+		if _, exists := seenSyncedTargets[mapping.To]; exists {
+			return fmt.Errorf("env sync target %q is declared more than once", mapping.To)
+		}
+		seenSyncedTargets[mapping.To] = struct{}{}
 	}
 	for _, binding := range portBindings {
 		if strings.TrimSpace(binding.Target) == "" {
@@ -301,11 +327,21 @@ func validateEffectiveConfig(cfg EffectiveConfig) error {
 		if window.Name == "" {
 			return errors.New("tmux window name must not be empty")
 		}
+		if window.Cwd != "" {
+			if err := validateTmuxWindowRelativePath(strings.TrimSpace(window.Cwd), fmt.Sprintf("tmux window %q cwd", window.Name)); err != nil {
+				return err
+			}
+		}
 		if window.Command == "" && window.Agent == "" {
 			return fmt.Errorf("tmux window %q must declare command or agent", window.Name)
 		}
 		if window.Command != "" && window.Agent != "" {
 			return fmt.Errorf("tmux window %q must not declare both command and agent", window.Name)
+		}
+		for _, envFile := range window.EnvFiles {
+			if err := validateTmuxWindowRelativePath(strings.TrimSpace(envFile), fmt.Sprintf("tmux window %q env file", window.Name)); err != nil {
+				return err
+			}
 		}
 		if window.Agent != "" {
 			primaryAgents++
@@ -396,7 +432,7 @@ func effectiveLinearPickerScope(cfg LinearConfig) string {
 	return "assigned"
 }
 
-func effectiveManagedEnvFiles(cfg EffectiveConfig) ([]string, error) {
+func effectiveGeneratedEnvFiles(cfg EffectiveConfig) ([]string, error) {
 	if len(cfg.Env.Targets) == 0 {
 		return nil, nil
 	}
@@ -406,13 +442,56 @@ func effectiveManagedEnvFiles(cfg EffectiveConfig) ([]string, error) {
 		if path == "" {
 			return nil, errors.New("env target path must not be empty")
 		}
-		paths = append(paths, path)
+		paths = append(paths, normalizeRelativePath(path))
+	}
+	return uniqueStrings(paths), nil
+}
+
+func effectiveSyncedEnvFiles(cfg EffectiveConfig) ([]EnvFileMapping, error) {
+	if len(cfg.Env.SyncFiles) == 0 {
+		return nil, nil
+	}
+	mappings := make([]EnvFileMapping, 0, len(cfg.Env.SyncFiles))
+	for _, mapping := range cfg.Env.SyncFiles {
+		from := strings.TrimSpace(mapping.From)
+		to := strings.TrimSpace(mapping.To)
+		if from == "" || to == "" {
+			return nil, errors.New("env sync files must include from and to")
+		}
+		mappings = append(mappings, EnvFileMapping{
+			From: normalizeRelativePath(from),
+			To:   normalizeRelativePath(to),
+		})
+	}
+	return mappings, nil
+}
+
+func effectiveManagedEnvFiles(cfg EffectiveConfig) ([]string, error) {
+	paths, err := effectiveGeneratedEnvFiles(cfg)
+	if err != nil {
+		return nil, err
+	}
+	mappings, err := effectiveSyncedEnvFiles(cfg)
+	if err != nil {
+		return nil, err
+	}
+	for _, mapping := range mappings {
+		paths = append(paths, mapping.To)
 	}
 	return uniqueStrings(paths), nil
 }
 
 func effectivePortBindings(cfg EffectiveConfig) ([]PortBindingConfig, error) {
-	return append([]PortBindingConfig(nil), cfg.Ports.Bindings...), nil
+	bindings := make([]PortBindingConfig, 0, len(cfg.Ports.Bindings))
+	for _, binding := range cfg.Ports.Bindings {
+		binding.Target = strings.TrimSpace(binding.Target)
+		if binding.Target != "" {
+			binding.Target = normalizeRelativePath(binding.Target)
+		}
+		binding.Key = strings.TrimSpace(binding.Key)
+		bindings = append(bindings, binding)
+	}
+	return bindings, nil
 }
 
 type workflowConfig struct {
@@ -453,6 +532,7 @@ func hasWorkflowConfig(cfg ConfigFile) bool {
 	return len(cfg.Bootstrap.Commands) > 0 ||
 		len(cfg.Bootstrap.EnvFiles) > 0 ||
 		len(cfg.Env.Targets) > 0 ||
+		len(cfg.Env.SyncFiles) > 0 ||
 		len(cfg.Ports.Bindings) > 0 ||
 		cfg.Delivery.Remote != "" ||
 		cfg.Delivery.SyncStrategy != "" ||
@@ -489,6 +569,11 @@ func workflowTrustEntries(cfg ConfigFile) []string {
 			entries = append(entries, "write managed env file: "+target.Path)
 		}
 	}
+	for _, mapping := range cfg.Env.SyncFiles {
+		if strings.TrimSpace(mapping.From) != "" && strings.TrimSpace(mapping.To) != "" {
+			entries = append(entries, fmt.Sprintf("sync local env file: %s -> %s", mapping.From, mapping.To))
+		}
+	}
 	for _, binding := range cfg.Ports.Bindings {
 		if binding.Target != "" && binding.Key != "" {
 			entries = append(entries, fmt.Sprintf("write preferred port binding: %s -> %s [%d-%d]", binding.Key, binding.Target, binding.Start, binding.End))
@@ -514,6 +599,11 @@ func workflowTrustEntries(cfg ConfigFile) []string {
 	for _, window := range cfg.Tmux.Windows {
 		if strings.TrimSpace(window.Command) != "" {
 			entries = append(entries, fmt.Sprintf("run tmux window %s: %s", window.Name, window.Command))
+		}
+		for _, envFile := range window.EnvFiles {
+			if strings.TrimSpace(envFile) != "" {
+				entries = append(entries, fmt.Sprintf("source tmux window %s env file: %s", window.Name, envFile))
+			}
 		}
 	}
 	if cfg.GitHub.Enabled {
@@ -551,7 +641,7 @@ func ReadConfigFile(path string) (string, bool, error) {
 type renderConfig struct {
 	Repo         renderRepoConfig             `toml:"repo" json:"repo"`
 	Bootstrap    *renderBootstrapConfig       `toml:"bootstrap,omitempty" json:"bootstrap,omitempty"`
-	Env          *EnvConfig                   `toml:"env,omitempty" json:"env,omitempty"`
+	Env          *renderEnvConfig             `toml:"env,omitempty" json:"env,omitempty"`
 	Ports        *renderPortsConfig           `toml:"ports,omitempty" json:"ports,omitempty"`
 	Delivery     *DeliveryConfig              `toml:"delivery,omitempty" json:"delivery,omitempty"`
 	GitHub       *GitHubConfig                `toml:"github,omitempty" json:"github,omitempty"`
@@ -583,14 +673,21 @@ type renderTmuxConfig struct {
 }
 
 type renderTmuxWindowConfig struct {
-	Name    string `toml:"name" json:"name"`
-	Command string `toml:"command,omitempty" json:"command,omitempty"`
-	Agent   string `toml:"agent,omitempty" json:"agent,omitempty"`
+	Name     string   `toml:"name" json:"name"`
+	Cwd      string   `toml:"cwd,omitempty" json:"cwd,omitempty"`
+	Command  string   `toml:"command,omitempty" json:"command,omitempty"`
+	Agent    string   `toml:"agent,omitempty" json:"agent,omitempty"`
+	EnvFiles []string `toml:"env_files,omitempty" json:"env_files,omitempty"`
 }
 
 type renderBootstrapConfig struct {
 	Commands []string         `toml:"commands,omitempty" json:"commands,omitempty"`
 	EnvFiles []EnvFileMapping `toml:"env_files,omitempty" json:"env_files,omitempty"`
+}
+
+type renderEnvConfig struct {
+	Targets   []EnvTargetConfig `toml:"targets,omitempty" json:"targets,omitempty"`
+	SyncFiles []EnvFileMapping  `toml:"sync_files,omitempty" json:"sync_files,omitempty"`
 }
 
 type renderLinearConfig struct {
@@ -650,8 +747,11 @@ func buildRenderableEffectiveConfig(cfg EffectiveConfig) renderConfig {
 		}
 		rendered.Bootstrap = &bootstrap
 	}
-	if len(cfg.Env.Targets) > 0 {
-		env := cfg.Env
+	if len(cfg.Env.Targets) > 0 || len(cfg.Env.SyncFiles) > 0 {
+		env := renderEnvConfig{
+			Targets:   cfg.Env.Targets,
+			SyncFiles: cfg.Env.SyncFiles,
+		}
 		rendered.Env = &env
 	}
 	if len(cfg.Ports.Bindings) > 0 {
@@ -701,9 +801,11 @@ func buildRenderableEffectiveConfig(cfg EffectiveConfig) renderConfig {
 		}
 		for _, window := range cfg.Tmux.Windows {
 			tmux.Windows = append(tmux.Windows, renderTmuxWindowConfig{
-				Name:    window.Name,
-				Command: window.Command,
-				Agent:   window.Agent,
+				Name:     window.Name,
+				Cwd:      window.Cwd,
+				Command:  window.Command,
+				Agent:    window.Agent,
+				EnvFiles: window.EnvFiles,
 			})
 		}
 		rendered.Tmux = &tmux
@@ -736,6 +838,7 @@ default_surface = "default"
 
 [env]
 targets = [{ path = ".env.agentflow" }]
+# sync_files = [{ from = ".env", to = ".env" }]
 
 [delivery]
 remote = "origin"
@@ -771,6 +874,36 @@ agent = "default"
 [requirements]
 binaries = ["git", "tmux", "codex", "nvim"]
 `)+"\n", repoName)
+}
+
+func validateTmuxWindowRelativePath(path string, label string) error {
+	return validateWorktreeRelativePath(path, label)
+}
+
+func validateWorktreeRelativePath(path string, label string) error {
+	return validateRelativePath(path, label, "worktree")
+}
+
+func validateRepoRelativePath(path string, label string) error {
+	return validateRelativePath(path, label, "repo root")
+}
+
+func validateRelativePath(path string, label string, rootName string) error {
+	if path == "" {
+		return fmt.Errorf("%s must not be empty", label)
+	}
+	if filepath.IsAbs(path) {
+		return fmt.Errorf("%s must be relative to the %s", label, rootName)
+	}
+	clean := filepath.Clean(path)
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+		return fmt.Errorf("%s must not escape the %s", label, rootName)
+	}
+	return nil
+}
+
+func normalizeRelativePath(path string) string {
+	return filepath.Clean(strings.TrimSpace(path))
 }
 
 func writeConfigFile(path string, contents string, force bool) (string, error) {

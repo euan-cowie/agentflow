@@ -436,6 +436,1054 @@ func TestUpExistingRestoresManagedEnvFiles(t *testing.T) {
 	}
 }
 
+func TestUpExistingRestoresSyncedEnvFilesFromCanonicalRepoRoot(t *testing.T) {
+	repo := initCommittedRepo(t)
+	installFakeTmux(t)
+	writeTestRepoConfig(t, repo, `
+[repo]
+name = "agentflow-test"
+base_branch = "main"
+default_surface = "default"
+
+[env]
+targets = [{ path = ".env.agentflow" }]
+sync_files = [{ from = ".env", to = ".env" }]
+
+[delivery]
+remote = "origin"
+sync_strategy = "rebase"
+preflight = ["review", "verify"]
+cleanup = "async"
+
+[agents.default]
+runner = "codex"
+command = "codex --no-alt-screen -s workspace-write -a on-request"
+prime_prompt = "Read AGENTS.md and wait for my next instruction."
+resume_prompt = "Resume the current task and wait for my next instruction."
+
+[tmux]
+session_name = "{{repo}}-{{task}}-{{id}}"
+
+[[tmux.windows]]
+name = "editor"
+command = "nvim ."
+
+[[tmux.windows]]
+name = "verify"
+command = "clear"
+
+[[tmux.windows]]
+name = "codex"
+agent = "default"
+`)
+	if err := os.WriteFile(filepath.Join(repo, ".env"), []byte("SECRET=repo-root\n"), 0o644); err != nil {
+		t.Fatalf("write canonical env file: %v", err)
+	}
+
+	ctx := context.Background()
+	exec := Executor{}
+	git := NewGitOps(exec)
+	repoRoot, err := git.RepoRoot(ctx, repo)
+	if err != nil {
+		t.Fatalf("RepoRoot returned error: %v", err)
+	}
+	repoRoot, err = filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks returned error: %v", err)
+	}
+	ref, taskID, err := resolveManualTask(repoRoot, "smoke test")
+	if err != nil {
+		t.Fatalf("resolveManualTask returned error: %v", err)
+	}
+
+	cfg := defaultEffectiveConfig()
+	cfg.Repo.Name = filepath.Base(repo)
+	branch := branchName(cfg, ref, taskID)
+	worktree := filepath.Join(t.TempDir(), ref.Slug+"-"+taskID[:6])
+	if err := git.CreateWorktree(ctx, repo, branch, worktree, "main"); err != nil {
+		t.Fatalf("CreateWorktree returned error: %v", err)
+	}
+
+	app, _, _ := newTestApp(t)
+	now := time.Now().UTC()
+	state := TaskState{
+		TaskID:             taskID,
+		TaskRef:            ref,
+		Status:             StatusBroken,
+		FailureReason:      "synced env file missing",
+		RepoRoot:           repoRoot,
+		RepoID:             repoID(repoRoot),
+		WorktreePath:       worktree,
+		Branch:             branch,
+		BaseBranch:         "main",
+		Surface:            "default",
+		TmuxSession:        renderSessionName(cfg, ref, taskID),
+		PrimaryAgentWindow: "codex",
+		ManagedEnvFiles:    []string{".env.agentflow"},
+		SyncedEnvFiles:     []EnvFileMapping{{From: ".env", To: ".env"}},
+		PortBindings: []PortBindingState{
+			{Target: ".env.agentflow", Key: "VITE_PORT", Port: 4101},
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := app.state.Save(state); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	summary, err := app.Up(ctx, UpOptions{
+		CommonOptions: CommonOptions{RepoPath: repo},
+		Task:          "smoke test",
+	})
+	if err != nil {
+		t.Fatalf("Up returned error: %v", err)
+	}
+	if summary.Status != StatusReady {
+		t.Fatalf("expected ready summary, got %+v", summary)
+	}
+
+	data, err := os.ReadFile(filepath.Join(worktree, ".env"))
+	if err != nil {
+		t.Fatalf("read restored synced env file: %v", err)
+	}
+	if !strings.Contains(string(data), "SECRET=repo-root") {
+		t.Fatalf("expected synced env file to be restored from repo root, got %q", string(data))
+	}
+}
+
+func TestUpExistingRestoresBootstrapEnvFiles(t *testing.T) {
+	repo := initCommittedRepo(t)
+	installFakeTmux(t)
+	if err := os.MkdirAll(filepath.Join(repo, "apps", "web"), 0o755); err != nil {
+		t.Fatalf("mkdir web app: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "apps", "web", ".env.example"), []byte("APP_NAME=coach-connect\n"), 0o644); err != nil {
+		t.Fatalf("write env example: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "apps", "web", "README.md"), []byte("web app\n"), 0o644); err != nil {
+		t.Fatalf("write web readme: %v", err)
+	}
+	runGit(t, repo, "add", "apps/web/.env.example", "apps/web/README.md")
+	runGit(t, repo, "commit", "-m", "add web app")
+	writeTestRepoConfig(t, repo, `
+[repo]
+name = "coach-connect"
+base_branch = "main"
+default_surface = "web"
+
+[bootstrap]
+env_files = [{ from = "apps/web/.env.example", to = "apps/web/.env.local" }]
+
+[tmux]
+session_name = "{{repo}}-{{task}}-{{id}}"
+
+[[tmux.windows]]
+name = "web"
+cwd = "apps/web"
+env_files = ["apps/web/.env.local"]
+command = "clear"
+`)
+
+	ctx := context.Background()
+	exec := Executor{}
+	git := NewGitOps(exec)
+	repoRoot, err := git.RepoRoot(ctx, repo)
+	if err != nil {
+		t.Fatalf("RepoRoot returned error: %v", err)
+	}
+	repoRoot, err = filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks returned error: %v", err)
+	}
+	ref, taskID, err := resolveManualTask(repoRoot, "smoke test")
+	if err != nil {
+		t.Fatalf("resolveManualTask returned error: %v", err)
+	}
+
+	cfg := defaultEffectiveConfig()
+	cfg.Repo.Name = filepath.Base(repo)
+	branch := branchName(cfg, ref, taskID)
+	worktree := filepath.Join(t.TempDir(), ref.Slug+"-"+taskID[:6])
+	if err := git.CreateWorktree(ctx, repo, branch, worktree, "main"); err != nil {
+		t.Fatalf("CreateWorktree returned error: %v", err)
+	}
+
+	app, _, _ := newTestApp(t)
+	t.Setenv("AGENTFLOW_STATE_HOME", app.state.root)
+	now := time.Now().UTC()
+	state := TaskState{
+		TaskID:        taskID,
+		TaskRef:       ref,
+		Status:        StatusBroken,
+		FailureReason: "bootstrap env file missing",
+		RepoRoot:      repoRoot,
+		RepoID:        repoID(repoRoot),
+		WorktreePath:  worktree,
+		Branch:        branch,
+		BaseBranch:    "main",
+		Surface:       "web",
+		TmuxSession:   renderSessionName(cfg, ref, taskID),
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	if err := app.state.Save(state); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	summary, err := app.Up(ctx, UpOptions{
+		CommonOptions: CommonOptions{RepoPath: repo},
+		Task:          "smoke test",
+	})
+	if err != nil {
+		t.Fatalf("Up returned error: %v", err)
+	}
+	if summary.Status != StatusReady {
+		t.Fatalf("expected ready summary, got %+v", summary)
+	}
+
+	data, err := os.ReadFile(filepath.Join(worktree, "apps", "web", ".env.local"))
+	if err != nil {
+		t.Fatalf("read restored bootstrap env file: %v", err)
+	}
+	if string(data) != "APP_NAME=coach-connect\n" {
+		t.Fatalf("expected bootstrap env file to be restored, got %q", string(data))
+	}
+}
+
+func TestUpLaunchesCommandWindowFromConfiguredCwdWithManagedEnv(t *testing.T) {
+	repo := initCommittedRepo(t)
+	logPath := filepath.Join(t.TempDir(), "tmux.log")
+	installRecordingTmux(t, logPath)
+	if err := os.MkdirAll(filepath.Join(repo, "apps", "web"), 0o755); err != nil {
+		t.Fatalf("mkdir web app: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".env"), []byte("ROOT_SECRET=coach-connect\n"), 0o644); err != nil {
+		t.Fatalf("write canonical root env: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "apps", "web", ".env.example"), []byte("APP_NAME=coach-connect\n"), 0o644); err != nil {
+		t.Fatalf("write env example: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "apps", "web", "README.md"), []byte("web app\n"), 0o644); err != nil {
+		t.Fatalf("write web readme: %v", err)
+	}
+	runGit(t, repo, "add", "apps/web/.env.example", "apps/web/README.md")
+	runGit(t, repo, "commit", "-m", "add web app")
+	writeTestRepoConfig(t, repo, `
+[repo]
+name = "coach-connect"
+base_branch = "main"
+default_surface = "web"
+
+[bootstrap]
+env_files = [{ from = "apps/web/.env.example", to = "apps/web/.env.local" }]
+
+[env]
+targets = [{ path = "apps/web/.env.agentflow" }]
+sync_files = [{ from = ".env", to = ".env" }]
+
+[tmux]
+session_name = "{{repo}}-{{task}}-{{id}}"
+
+[[ports.bindings]]
+target = "apps/web/.env.agentflow"
+key = "PORT"
+start = 4101
+end = 4199
+
+[[tmux.windows]]
+name = "web"
+cwd = "apps/web"
+env_files = [".env", "apps/web/.env.local", "apps/web/.env.agentflow"]
+command = "bun run dev"
+`)
+
+	originalAllocator := preferredPortAllocator
+	preferredPortAllocator = func(start, end int, reserved map[int]struct{}) (int, error) {
+		for port := start; port <= end; port++ {
+			if _, exists := reserved[port]; exists {
+				continue
+			}
+			return port, nil
+		}
+		return 0, nil
+	}
+	defer func() {
+		preferredPortAllocator = originalAllocator
+	}()
+
+	app, _, _ := newTestApp(t)
+	t.Setenv("AGENTFLOW_STATE_HOME", app.state.root)
+	summary, err := app.Up(context.Background(), UpOptions{
+		CommonOptions: CommonOptions{RepoPath: repo},
+		Task:          "run dev server",
+	})
+	if err != nil {
+		t.Fatalf("Up returned error: %v", err)
+	}
+	if summary.Status != StatusReady {
+		t.Fatalf("expected ready summary, got %+v", summary)
+	}
+
+	localEnvPath := filepath.Join(summary.Worktree, "apps", "web", ".env.local")
+	localEnvData, err := os.ReadFile(localEnvPath)
+	if err != nil {
+		t.Fatalf("read seeded env file: %v", err)
+	}
+	if !strings.Contains(string(localEnvData), "APP_NAME=coach-connect") {
+		t.Fatalf("expected seeded env file contents, got %q", string(localEnvData))
+	}
+
+	rootEnvPath := filepath.Join(summary.Worktree, ".env")
+	rootEnvData, err := os.ReadFile(rootEnvPath)
+	if err != nil {
+		t.Fatalf("read synced root env file: %v", err)
+	}
+	if !strings.Contains(string(rootEnvData), "ROOT_SECRET=coach-connect") {
+		t.Fatalf("expected synced root env contents, got %q", string(rootEnvData))
+	}
+
+	managedEnvPath := filepath.Join(summary.Worktree, "apps", "web", ".env.agentflow")
+	managedEnvData, err := os.ReadFile(managedEnvPath)
+	if err != nil {
+		t.Fatalf("read managed env file: %v", err)
+	}
+	if !strings.Contains(string(managedEnvData), "PORT=") {
+		t.Fatalf("expected managed env file to contain PORT, got %q", string(managedEnvData))
+	}
+
+	logDataBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read tmux log: %v", err)
+	}
+	logData := string(logDataBytes)
+	expectedCwd := filepath.Join(summary.Worktree, "apps", "web")
+	if !strings.Contains(logData, "-c "+expectedCwd) {
+		t.Fatalf("expected tmux to start the window in %q, log=%q", expectedCwd, logData)
+	}
+	if !strings.Contains(logData, ". "+shellQuote(rootEnvPath)) {
+		t.Fatalf("expected tmux command to source %q, log=%q", rootEnvPath, logData)
+	}
+	if !strings.Contains(logData, ". "+shellQuote(localEnvPath)) {
+		t.Fatalf("expected tmux command to source %q, log=%q", localEnvPath, logData)
+	}
+	if !strings.Contains(logData, ". "+shellQuote(managedEnvPath)) {
+		t.Fatalf("expected tmux command to source %q, log=%q", managedEnvPath, logData)
+	}
+	if !strings.Contains(logData, "bun run dev") {
+		t.Fatalf("expected tmux command to run bun dev, log=%q", logData)
+	}
+}
+
+func TestReconcileExistingResyncsSyncedEnvFilesFromCanonicalRepoRoot(t *testing.T) {
+	repo := initCommittedRepo(t)
+	installFakeTmux(t)
+	writeTestRepoConfig(t, repo, `
+[repo]
+name = "agentflow-test"
+base_branch = "main"
+default_surface = "default"
+
+[env]
+targets = [{ path = ".env.agentflow" }]
+sync_files = [{ from = ".env", to = ".env" }]
+
+[delivery]
+remote = "origin"
+sync_strategy = "rebase"
+preflight = ["review", "verify"]
+cleanup = "async"
+
+[agents.default]
+runner = "codex"
+command = "codex --no-alt-screen -s workspace-write -a on-request"
+prime_prompt = "Read AGENTS.md and wait for my next instruction."
+resume_prompt = "Resume the current task and wait for my next instruction."
+
+[tmux]
+session_name = "{{repo}}-{{task}}-{{id}}"
+
+[[tmux.windows]]
+name = "editor"
+command = "nvim ."
+
+[[tmux.windows]]
+name = "verify"
+command = "clear"
+
+[[tmux.windows]]
+name = "codex"
+agent = "default"
+`)
+
+	ctx := context.Background()
+	exec := Executor{}
+	git := NewGitOps(exec)
+	repoRoot, err := git.RepoRoot(ctx, repo)
+	if err != nil {
+		t.Fatalf("RepoRoot returned error: %v", err)
+	}
+	repoRoot, err = filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks returned error: %v", err)
+	}
+	ref, taskID, err := resolveManualTask(repoRoot, "smoke test")
+	if err != nil {
+		t.Fatalf("resolveManualTask returned error: %v", err)
+	}
+
+	cfg := defaultEffectiveConfig()
+	cfg.Repo.Name = filepath.Base(repo)
+	branch := branchName(cfg, ref, taskID)
+	worktree := filepath.Join(t.TempDir(), ref.Slug+"-"+taskID[:6])
+	if err := git.CreateWorktree(ctx, repo, branch, worktree, "main"); err != nil {
+		t.Fatalf("CreateWorktree returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".env"), []byte("SECRET=canonical\n"), 0o644); err != nil {
+		t.Fatalf("write canonical env file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".env"), []byte("SECRET=stale\n"), 0o644); err != nil {
+		t.Fatalf("write stale worktree env file: %v", err)
+	}
+
+	app, _, _ := newTestApp(t)
+	now := time.Now().UTC()
+	state := TaskState{
+		TaskID:          taskID,
+		TaskRef:         ref,
+		Status:          StatusReady,
+		RepoRoot:        repoRoot,
+		RepoID:          repoID(repoRoot),
+		WorktreePath:    worktree,
+		Branch:          branch,
+		BaseBranch:      "main",
+		Surface:         "default",
+		TmuxSession:     renderSessionName(cfg, ref, taskID),
+		ManagedEnvFiles: []string{".env.agentflow"},
+		SyncedEnvFiles:  []EnvFileMapping{{From: ".env", To: ".env"}},
+		PortBindings: []PortBindingState{
+			{Target: ".env.agentflow", Key: "VITE_PORT", Port: 4101},
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	runtime, err := app.loadRuntime(ctx, repo)
+	if err != nil {
+		t.Fatalf("loadRuntime returned error: %v", err)
+	}
+	if _, err := app.reconcileExisting(ctx, runtime, state); err != nil {
+		t.Fatalf("reconcileExisting returned error: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(worktree, ".env"))
+	if err != nil {
+		t.Fatalf("read reconciled synced env file: %v", err)
+	}
+	if !strings.Contains(string(data), "SECRET=canonical") {
+		t.Fatalf("expected reconcileExisting to refresh the synced env file, got %q", string(data))
+	}
+}
+
+func TestUpFailsBeforeTmuxWhenSyncedEnvSourceMissing(t *testing.T) {
+	repo := initCommittedRepo(t)
+	logPath := filepath.Join(t.TempDir(), "tmux.log")
+	installRecordingTmux(t, logPath)
+	writeTestRepoConfig(t, repo, `
+[repo]
+name = "agentflow-test"
+base_branch = "main"
+default_surface = "default"
+
+[env]
+sync_files = [{ from = ".env", to = ".env" }]
+
+[tmux]
+session_name = "{{repo}}-{{task}}-{{id}}"
+
+[[tmux.windows]]
+name = "editor"
+command = "clear"
+`)
+
+	app, _, _ := newTestApp(t)
+	t.Setenv("AGENTFLOW_STATE_HOME", app.state.root)
+	_, err := app.Up(context.Background(), UpOptions{
+		CommonOptions: CommonOptions{RepoPath: repo},
+		Task:          "smoke test",
+	})
+	if err == nil {
+		t.Fatal("expected Up to fail when the synced env source is missing")
+	}
+	if !strings.Contains(err.Error(), "stat env sync source") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	logData, readErr := os.ReadFile(logPath)
+	if readErr == nil && strings.TrimSpace(string(logData)) != "" {
+		t.Fatalf("expected tmux not to launch when env sync fails, log=%q", string(logData))
+	}
+}
+
+func TestUpTrustDeclinedDoesNotSyncEnvFiles(t *testing.T) {
+	repo := initCommittedRepo(t)
+	installFakeTmux(t)
+	if err := os.WriteFile(filepath.Join(repo, ".env"), []byte("SECRET=repo-root\n"), 0o644); err != nil {
+		t.Fatalf("write canonical env file: %v", err)
+	}
+	writeTestRepoConfig(t, repo, `
+[repo]
+name = "agentflow-test"
+base_branch = "main"
+default_surface = "default"
+
+[env]
+sync_files = [{ from = ".env", to = ".env" }]
+
+[tmux]
+session_name = "{{repo}}-{{task}}-{{id}}"
+
+[[tmux.windows]]
+name = "editor"
+command = "clear"
+`)
+
+	app, _, _ := newTestApp(t)
+	app.stdin = bytes.NewBufferString("no\n")
+	t.Setenv("AGENTFLOW_STATE_HOME", app.state.root)
+
+	ctx := context.Background()
+	runtime, err := app.loadRuntime(ctx, repo)
+	if err != nil {
+		t.Fatalf("loadRuntime returned error: %v", err)
+	}
+	worktreeRoot, err := resolveWorktreeRoot(runtime)
+	if err != nil {
+		t.Fatalf("resolveWorktreeRoot returned error: %v", err)
+	}
+	repoRoot, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatalf("EvalSymlinks returned error: %v", err)
+	}
+	ref, taskID, err := resolveManualTask(repoRoot, "smoke test")
+	if err != nil {
+		t.Fatalf("resolveManualTask returned error: %v", err)
+	}
+	expectedWorktree := filepath.Join(worktreeRoot, ref.Slug+"-"+taskID[:6])
+
+	_, err = app.Up(ctx, UpOptions{
+		CommonOptions: CommonOptions{RepoPath: repo},
+		Task:          "smoke test",
+	})
+	if err == nil {
+		t.Fatal("expected trust decline to abort up")
+	}
+	if !strings.Contains(err.Error(), "repo trust declined") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(expectedWorktree, ".env")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected no synced env file to be created, stat err=%v", statErr)
+	}
+}
+
+func TestUpSyncsEnvFilesBeforeBootstrapEnvFiles(t *testing.T) {
+	repo := initCommittedRepo(t)
+	installFakeTmux(t)
+	if err := os.MkdirAll(filepath.Join(repo, "apps", "web"), 0o755); err != nil {
+		t.Fatalf("mkdir web app: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "apps", "web", "README.md"), []byte("web app\n"), 0o644); err != nil {
+		t.Fatalf("write web readme: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".env"), []byte("ROOT_SECRET=coach-connect\n"), 0o644); err != nil {
+		t.Fatalf("write canonical env file: %v", err)
+	}
+	runGit(t, repo, "add", "apps/web/README.md")
+	runGit(t, repo, "commit", "-m", "add web app")
+	writeTestRepoConfig(t, repo, `
+[repo]
+name = "coach-connect"
+base_branch = "main"
+default_surface = "web"
+
+[bootstrap]
+env_files = [{ from = ".env", to = "apps/web/.env.local" }]
+
+[env]
+sync_files = [{ from = ".env", to = ".env" }]
+
+[tmux]
+session_name = "{{repo}}-{{task}}-{{id}}"
+
+[[tmux.windows]]
+name = "editor"
+command = "clear"
+`)
+
+	app, _, _ := newTestApp(t)
+	t.Setenv("AGENTFLOW_STATE_HOME", app.state.root)
+	summary, err := app.Up(context.Background(), UpOptions{
+		CommonOptions: CommonOptions{RepoPath: repo},
+		Task:          "smoke test",
+	})
+	if err != nil {
+		t.Fatalf("Up returned error: %v", err)
+	}
+	if summary.Status != StatusReady {
+		t.Fatalf("expected ready summary, got %+v", summary)
+	}
+
+	localEnvData, err := os.ReadFile(filepath.Join(summary.Worktree, "apps", "web", ".env.local"))
+	if err != nil {
+		t.Fatalf("read seeded env file: %v", err)
+	}
+	if string(localEnvData) != "ROOT_SECRET=coach-connect\n" {
+		t.Fatalf("expected bootstrap env file to use synced env contents, got %q", string(localEnvData))
+	}
+}
+
+func TestVerifyRespawnsVerifyWindowWithConfiguredRuntimeFields(t *testing.T) {
+	repo := initCommittedRepo(t)
+	logPath := filepath.Join(t.TempDir(), "tmux.log")
+	installRecordingTmuxWithExistingVerifyWindow(t, logPath)
+	if err := os.MkdirAll(filepath.Join(repo, "apps", "web"), 0o755); err != nil {
+		t.Fatalf("mkdir web app: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "apps", "web", "README.md"), []byte("web app\n"), 0o644); err != nil {
+		t.Fatalf("write web readme: %v", err)
+	}
+	runGit(t, repo, "add", "apps/web/README.md")
+	runGit(t, repo, "commit", "-m", "add web app")
+	writeTestRepoConfig(t, repo, `
+[repo]
+name = "coach-connect"
+base_branch = "main"
+default_surface = "web"
+
+[commands]
+verify_quick = "printf verify-window-runtime"
+
+[tmux]
+session_name = "{{repo}}-{{task}}-{{id}}"
+
+[[tmux.windows]]
+name = "verify"
+cwd = "apps/web"
+env_files = [".env", "apps/web/.env.local", "apps/web/.env.agentflow"]
+command = "clear"
+`)
+
+	ctx := context.Background()
+	exec := Executor{}
+	git := NewGitOps(exec)
+	repoRoot, err := git.RepoRoot(ctx, repo)
+	if err != nil {
+		t.Fatalf("RepoRoot returned error: %v", err)
+	}
+	repoRoot, err = filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks returned error: %v", err)
+	}
+	ref, taskID, err := resolveManualTask(repoRoot, "smoke test")
+	if err != nil {
+		t.Fatalf("resolveManualTask returned error: %v", err)
+	}
+
+	app, _, _ := newTestApp(t)
+	runtime, err := app.loadRuntime(ctx, repo)
+	if err != nil {
+		t.Fatalf("loadRuntime returned error: %v", err)
+	}
+	branch := branchName(runtime.EffectiveConfig, ref, taskID)
+	worktree := filepath.Join(t.TempDir(), ref.Slug+"-"+taskID[:6])
+	if err := git.CreateWorktree(ctx, repo, branch, worktree, "main"); err != nil {
+		t.Fatalf("CreateWorktree returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".env"), []byte("ROOT_SECRET=coach-connect\n"), 0o644); err != nil {
+		t.Fatalf("write root env: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "apps", "web", ".env.local"), []byte("APP_NAME=coach-connect\n"), 0o644); err != nil {
+		t.Fatalf("write local env: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "apps", "web", ".env.agentflow"), []byte("PORT=4101\n"), 0o644); err != nil {
+		t.Fatalf("write managed env: %v", err)
+	}
+
+	now := time.Now().UTC()
+	state := TaskState{
+		TaskID:       taskID,
+		TaskRef:      ref,
+		Status:       StatusReady,
+		RepoRoot:     repoRoot,
+		RepoID:       repoID(repoRoot),
+		WorktreePath: worktree,
+		Branch:       branch,
+		BaseBranch:   "main",
+		Surface:      "web",
+		TmuxSession:  renderSessionName(runtime.EffectiveConfig, ref, taskID),
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := app.state.Save(state); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	summary, err := app.Verify(ctx, VerifyOptions{
+		CommonOptions: CommonOptions{RepoPath: repo},
+		Task:          "smoke test",
+	}, "verify")
+	if err != nil {
+		t.Fatalf("Verify returned error: %v", err)
+	}
+	if summary.LogPath == "" {
+		t.Fatalf("expected verify summary to include log path, got %+v", summary)
+	}
+
+	logDataBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read tmux log: %v", err)
+	}
+	logData := string(logDataBytes)
+	expectedCwd := filepath.Join(worktree, "apps", "web")
+	if !strings.Contains(logData, "respawn-window") {
+		t.Fatalf("expected verify to respawn the tmux window, log=%q", logData)
+	}
+	if !strings.Contains(logData, "-c "+expectedCwd) {
+		t.Fatalf("expected verify to run from %q, log=%q", expectedCwd, logData)
+	}
+	if !strings.Contains(logData, ". "+shellQuote(filepath.Join(worktree, ".env"))) {
+		t.Fatalf("expected verify to source root env file, log=%q", logData)
+	}
+	if !strings.Contains(logData, ". "+shellQuote(filepath.Join(worktree, "apps", "web", ".env.local"))) {
+		t.Fatalf("expected verify to source local env file, log=%q", logData)
+	}
+	if !strings.Contains(logData, ". "+shellQuote(filepath.Join(worktree, "apps", "web", ".env.agentflow"))) {
+		t.Fatalf("expected verify to source managed env file, log=%q", logData)
+	}
+	if !strings.Contains(logData, "printf verify-window-runtime") {
+		t.Fatalf("expected verify command in tmux respawn, log=%q", logData)
+	}
+}
+
+func TestRunConfiguredCommandUsesVerifyWindowRuntimeFields(t *testing.T) {
+	repo := initCommittedRepo(t)
+	installFakeTmux(t)
+	if err := os.MkdirAll(filepath.Join(repo, "apps", "web"), 0o755); err != nil {
+		t.Fatalf("mkdir web app: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "apps", "web", "README.md"), []byte("web app\n"), 0o644); err != nil {
+		t.Fatalf("write web readme: %v", err)
+	}
+	runGit(t, repo, "add", "apps/web/README.md")
+	runGit(t, repo, "commit", "-m", "add web app")
+	writeTestRepoConfig(t, repo, `
+[repo]
+name = "coach-connect"
+base_branch = "main"
+default_surface = "web"
+
+[commands]
+review = "pwd > review.cwd && printf '%s' \"$ROOT_SECRET\" > root.secret && printf '%s' \"$APP_NAME\" > app.name && printf '%s' \"$PORT\" > port.txt"
+
+[tmux]
+session_name = "{{repo}}-{{task}}-{{id}}"
+
+[[tmux.windows]]
+name = "verify"
+cwd = "apps/web"
+env_files = [".env", "apps/web/.env.local", "apps/web/.env.agentflow"]
+command = "clear"
+`)
+
+	ctx := context.Background()
+	exec := Executor{}
+	git := NewGitOps(exec)
+	repoRoot, err := git.RepoRoot(ctx, repo)
+	if err != nil {
+		t.Fatalf("RepoRoot returned error: %v", err)
+	}
+	repoRoot, err = filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks returned error: %v", err)
+	}
+	ref, taskID, err := resolveManualTask(repoRoot, "smoke test")
+	if err != nil {
+		t.Fatalf("resolveManualTask returned error: %v", err)
+	}
+
+	app, _, _ := newTestApp(t)
+	runtime, err := app.loadRuntime(ctx, repo)
+	if err != nil {
+		t.Fatalf("loadRuntime returned error: %v", err)
+	}
+	branch := branchName(runtime.EffectiveConfig, ref, taskID)
+	worktree := filepath.Join(t.TempDir(), ref.Slug+"-"+taskID[:6])
+	if err := git.CreateWorktree(ctx, repo, branch, worktree, "main"); err != nil {
+		t.Fatalf("CreateWorktree returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".env"), []byte("ROOT_SECRET=coach-connect\n"), 0o644); err != nil {
+		t.Fatalf("write root env: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "apps", "web", ".env.local"), []byte("APP_NAME=coach-connect\n"), 0o644); err != nil {
+		t.Fatalf("write local env: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "apps", "web", ".env.agentflow"), []byte("PORT=4101\n"), 0o644); err != nil {
+		t.Fatalf("write managed env: %v", err)
+	}
+
+	now := time.Now().UTC()
+	state := TaskState{
+		TaskID:       taskID,
+		TaskRef:      ref,
+		Status:       StatusReady,
+		RepoRoot:     repoRoot,
+		RepoID:       repoID(repoRoot),
+		WorktreePath: worktree,
+		Branch:       branch,
+		BaseBranch:   "main",
+		Surface:      "web",
+		TmuxSession:  renderSessionName(runtime.EffectiveConfig, ref, taskID),
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+
+	summary, err := app.runConfiguredCommand(ctx, runtime, state, "review", true)
+	if err != nil {
+		t.Fatalf("runConfiguredCommand returned error: %v", err)
+	}
+	if summary.LogPath == "" {
+		t.Fatalf("expected review summary to include log path, got %+v", summary)
+	}
+
+	expectedCwd := filepath.Join(worktree, "apps", "web")
+	realExpectedCwd, err := filepath.EvalSymlinks(expectedCwd)
+	if err != nil {
+		t.Fatalf("EvalSymlinks returned error: %v", err)
+	}
+	cwdData, err := os.ReadFile(filepath.Join(expectedCwd, "review.cwd"))
+	if err != nil {
+		t.Fatalf("read review cwd file: %v", err)
+	}
+	if strings.TrimSpace(string(cwdData)) != realExpectedCwd {
+		t.Fatalf("expected review cwd %q, got %q", realExpectedCwd, strings.TrimSpace(string(cwdData)))
+	}
+	rootSecret, err := os.ReadFile(filepath.Join(expectedCwd, "root.secret"))
+	if err != nil {
+		t.Fatalf("read root secret: %v", err)
+	}
+	if string(rootSecret) != "coach-connect" {
+		t.Fatalf("expected sourced root secret, got %q", string(rootSecret))
+	}
+	appName, err := os.ReadFile(filepath.Join(expectedCwd, "app.name"))
+	if err != nil {
+		t.Fatalf("read app name: %v", err)
+	}
+	if string(appName) != "coach-connect" {
+		t.Fatalf("expected sourced app name, got %q", string(appName))
+	}
+	portValue, err := os.ReadFile(filepath.Join(expectedCwd, "port.txt"))
+	if err != nil {
+		t.Fatalf("read port value: %v", err)
+	}
+	if string(portValue) != "4101" {
+		t.Fatalf("expected sourced port, got %q", string(portValue))
+	}
+	if _, err := os.Stat(filepath.Join(worktree, "review.cwd")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected review command not to run from worktree root, stat err=%v", err)
+	}
+}
+
+func TestRunConfiguredCommandUsesVerifyAliasWindowRuntimeFields(t *testing.T) {
+	repo := initCommittedRepo(t)
+	installFakeTmux(t)
+	if err := os.MkdirAll(filepath.Join(repo, "apps", "web"), 0o755); err != nil {
+		t.Fatalf("mkdir web app: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "apps", "web", "README.md"), []byte("web app\n"), 0o644); err != nil {
+		t.Fatalf("write web readme: %v", err)
+	}
+	runGit(t, repo, "add", "apps/web/README.md")
+	runGit(t, repo, "commit", "-m", "add web app")
+	writeTestRepoConfig(t, repo, `
+[repo]
+name = "coach-connect"
+base_branch = "main"
+default_surface = "web"
+
+[commands]
+verify_quick = "pwd > verify.cwd && printf '%s' \"$ROOT_SECRET\" > root.secret && printf '%s' \"$APP_NAME\" > app.name && printf '%s' \"$PORT\" > port.txt"
+
+[tmux]
+session_name = "{{repo}}-{{task}}-{{id}}"
+
+[[tmux.windows]]
+name = "verify"
+cwd = "apps/web"
+env_files = [".env", "apps/web/.env.local", "apps/web/.env.agentflow"]
+command = "clear"
+`)
+
+	ctx := context.Background()
+	exec := Executor{}
+	git := NewGitOps(exec)
+	repoRoot, err := git.RepoRoot(ctx, repo)
+	if err != nil {
+		t.Fatalf("RepoRoot returned error: %v", err)
+	}
+	repoRoot, err = filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks returned error: %v", err)
+	}
+	ref, taskID, err := resolveManualTask(repoRoot, "smoke test")
+	if err != nil {
+		t.Fatalf("resolveManualTask returned error: %v", err)
+	}
+
+	app, _, _ := newTestApp(t)
+	runtime, err := app.loadRuntime(ctx, repo)
+	if err != nil {
+		t.Fatalf("loadRuntime returned error: %v", err)
+	}
+	branch := branchName(runtime.EffectiveConfig, ref, taskID)
+	worktree := filepath.Join(t.TempDir(), ref.Slug+"-"+taskID[:6])
+	if err := git.CreateWorktree(ctx, repo, branch, worktree, "main"); err != nil {
+		t.Fatalf("CreateWorktree returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".env"), []byte("ROOT_SECRET=coach-connect\n"), 0o644); err != nil {
+		t.Fatalf("write root env: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "apps", "web", ".env.local"), []byte("APP_NAME=coach-connect\n"), 0o644); err != nil {
+		t.Fatalf("write local env: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "apps", "web", ".env.agentflow"), []byte("PORT=4101\n"), 0o644); err != nil {
+		t.Fatalf("write managed env: %v", err)
+	}
+
+	now := time.Now().UTC()
+	state := TaskState{
+		TaskID:       taskID,
+		TaskRef:      ref,
+		Status:       StatusReady,
+		RepoRoot:     repoRoot,
+		RepoID:       repoID(repoRoot),
+		WorktreePath: worktree,
+		Branch:       branch,
+		BaseBranch:   "main",
+		Surface:      "web",
+		TmuxSession:  renderSessionName(runtime.EffectiveConfig, ref, taskID),
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+
+	summary, err := app.runConfiguredCommand(ctx, runtime, state, "verify_quick", true)
+	if err != nil {
+		t.Fatalf("runConfiguredCommand returned error: %v", err)
+	}
+	if summary.LogPath == "" {
+		t.Fatalf("expected verify summary to include log path, got %+v", summary)
+	}
+
+	expectedCwd := filepath.Join(worktree, "apps", "web")
+	realExpectedCwd, err := filepath.EvalSymlinks(expectedCwd)
+	if err != nil {
+		t.Fatalf("EvalSymlinks returned error: %v", err)
+	}
+	cwdData, err := os.ReadFile(filepath.Join(expectedCwd, "verify.cwd"))
+	if err != nil {
+		t.Fatalf("read verify cwd file: %v", err)
+	}
+	if strings.TrimSpace(string(cwdData)) != realExpectedCwd {
+		t.Fatalf("expected verify cwd %q, got %q", realExpectedCwd, strings.TrimSpace(string(cwdData)))
+	}
+	rootSecret, err := os.ReadFile(filepath.Join(expectedCwd, "root.secret"))
+	if err != nil {
+		t.Fatalf("read root secret: %v", err)
+	}
+	if string(rootSecret) != "coach-connect" {
+		t.Fatalf("expected sourced root secret, got %q", string(rootSecret))
+	}
+	appName, err := os.ReadFile(filepath.Join(expectedCwd, "app.name"))
+	if err != nil {
+		t.Fatalf("read app name: %v", err)
+	}
+	if string(appName) != "coach-connect" {
+		t.Fatalf("expected sourced app name, got %q", string(appName))
+	}
+	portValue, err := os.ReadFile(filepath.Join(expectedCwd, "port.txt"))
+	if err != nil {
+		t.Fatalf("read port value: %v", err)
+	}
+	if string(portValue) != "4101" {
+		t.Fatalf("expected sourced port, got %q", string(portValue))
+	}
+	if _, err := os.Stat(filepath.Join(worktree, "verify.cwd")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected verify alias command not to run from worktree root, stat err=%v", err)
+	}
+}
+
+func TestSourceEnvFilesCommandDoesNotLetLogicalOrMaskPreludeFailure(t *testing.T) {
+	t.Parallel()
+
+	worktree := t.TempDir()
+	command := sourceEnvFilesCommand("true || true", []string{filepath.Join(worktree, "missing.env")})
+
+	if _, err := (Executor{}).Run(context.Background(), worktree, nil, "sh", "-lc", command); err == nil {
+		t.Fatal("expected missing env file to fail even when the command contains top-level ||")
+	}
+}
+
+func TestResolveTmuxWindowCwdRejectsSymlinkEscape(t *testing.T) {
+	t.Parallel()
+
+	worktree := t.TempDir()
+	external := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(worktree, "apps"), 0o755); err != nil {
+		t.Fatalf("mkdir apps dir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(external, "web"), 0o755); err != nil {
+		t.Fatalf("mkdir external web dir: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(external, "web"), filepath.Join(worktree, "apps", "web")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	_, err := resolveTmuxWindowCwd(worktree, TmuxWindowConfig{
+		Name: "web",
+		Cwd:  "apps/web",
+	})
+	if err == nil {
+		t.Fatal("expected symlinked tmux cwd outside the worktree to fail")
+	}
+	if !strings.Contains(err.Error(), "must not escape the worktree") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestResolveTmuxWindowEnvFilesRejectSymlinkEscape(t *testing.T) {
+	t.Parallel()
+
+	worktree := t.TempDir()
+	external := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(worktree, "apps", "web"), 0o755); err != nil {
+		t.Fatalf("mkdir worktree web dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(external, "shared.env"), []byte("SECRET=outside\n"), 0o644); err != nil {
+		t.Fatalf("write external env file: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(external, "shared.env"), filepath.Join(worktree, "apps", "web", ".env.agentflow")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	_, err := resolveTmuxWindowEnvFiles(worktree, TmuxWindowConfig{
+		Name:     "web",
+		EnvFiles: []string{"apps/web/.env.agentflow"},
+	})
+	if err == nil {
+		t.Fatal("expected symlinked tmux env file outside the worktree to fail")
+	}
+	if !strings.Contains(err.Error(), "must not escape the worktree") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestUpRequiresExplicitRepoWorkflow(t *testing.T) {
 	repo := initCommittedRepo(t)
 	installFakeTmux(t)
@@ -1532,6 +2580,41 @@ case "$1" in
     ;;
   display-message)
     exit 1
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, shellQuote(logPath))
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatalf("write recording tmux: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func installRecordingTmuxWithExistingVerifyWindow(t *testing.T, logPath string) {
+	t.Helper()
+
+	binDir := t.TempDir()
+	script := filepath.Join(binDir, "tmux")
+	content := fmt.Sprintf(`#!/bin/sh
+{
+  printf 'cmd:'
+  for arg in "$@"; do
+    printf ' %%s' "$arg"
+  done
+  printf '\n'
+} >> %s
+case "$1" in
+  has-session)
+    exit 0
+    ;;
+  list-windows)
+    exit 0
+    ;;
+  display-message)
+    printf 'verify\n'
+    exit 0
     ;;
   *)
     exit 0
