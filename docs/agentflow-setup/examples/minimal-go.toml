@@ -1,0 +1,60 @@
+[repo]
+name = "go-service"
+base_branch = "origin/main"
+worktree_root = "{{agentflow_state_home}}/worktrees/{{repo_id}}"
+branch_prefix = "af"
+default_surface = "cli"
+
+[bootstrap]
+commands = ["go mod download"]
+
+[env]
+targets = [{ path = ".env.agentflow" }]
+
+[delivery]
+remote = "origin"
+sync_strategy = "rebase"
+preflight = ["review", "verify"]
+cleanup = "async"
+
+[github]
+enabled = true
+draft_on_submit = true
+merge_method = "auto"
+auto_merge = true
+delete_remote_branch = true
+
+[linear]
+api_key_env = "LINEAR_API_KEY"
+picker_scope = "assigned"
+issue_sort = "state_then_updated"
+
+[commands]
+review = "go test ./..."
+verify_quick = "go test ./..."
+verify_cli = "go test ./..."
+
+[agents.default]
+runner = "codex"
+command = "codex --no-alt-screen -s workspace-write -a on-request"
+prime_prompt = "Read AGENTS.md and repo instructions, inspect the task context and relevant files, identify the likely verification path for the current surface, send a short status update with your plan, then wait for confirmation before editing."
+resume_prompt = "Resume the current task, re-check AGENTS.md and local instructions if needed, inspect the current state and recent changes, send a short status update with your next-step plan, then wait for confirmation before editing."
+
+[tmux]
+session_name = "{{repo}}-{{task}}-{{id}}"
+
+[[tmux.windows]]
+name = "editor"
+command = "nvim ."
+
+[[tmux.windows]]
+name = "verify"
+command = "clear"
+
+[[tmux.windows]]
+name = "codex"
+agent = "default"
+
+[requirements]
+binaries = ["git", "tmux", "codex", "gh", "go", "nvim"]
+mcp_servers = ["linear"]
